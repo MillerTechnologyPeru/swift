@@ -1393,6 +1393,14 @@ unsigned Lexer::lexCharacter(const char *&CurPtr, char StopQuote,
   case '\'': ++CurPtr; return '\'';
   case '\\': ++CurPtr; return '\\';
 
+  case 'p':
+    ++CurPtr;
+    if (CurPtr-2 == CharStart)
+      return '\0'; // Pascal string, needs a dummy value for now.
+    if (EmitDiagnostics)
+      diagnose(CurPtr-1, diag::lex_invalid_escape);
+    return ~1U;
+
   case 'u': {  //  \u HEX HEX HEX HEX
     ++CurPtr;
     if (*CurPtr != '{') {
@@ -2164,6 +2172,7 @@ StringRef Lexer::getEncodedStringSegmentImpl(StringRef Bytes,
     IndentToStrip = getMultilineTrailingIndent(Bytes).size();
 
   bool IsEscapedNewline = false;
+  bool HasPascalStringLength = false;
   while (BytesPtr < Bytes.end()) {
     char CurChar = *BytesPtr++;
 
@@ -2204,6 +2213,13 @@ StringRef Lexer::getEncodedStringSegmentImpl(StringRef Bytes,
     case '"': TempString.push_back('"'); continue;
     case '\'': TempString.push_back('\''); continue;
     case '\\': TempString.push_back('\\'); continue;
+    
+    case 'p':
+      // Pascal string length byte.
+      assert(BytesPtr-2 == Bytes.begin());
+      TempString.push_back('\0');
+      HasPascalStringLength = true;
+      continue;
 
     case ' ': case '\t': case '\n': case '\r':
       if (maybeConsumeNewlineEscape(BytesPtr, -1)) {
@@ -2233,6 +2249,12 @@ StringRef Lexer::getEncodedStringSegmentImpl(StringRef Bytes,
       EncodeToUTF8(CharValue, TempString);
   }
   
+  if (HasPascalStringLength) {
+    assert(TempString.size() <= UCHAR_MAX); // FIXME: diagnose this somehow??
+    assert(TempString[0] == '\0');
+    TempString[0] = TempString.size() - 1;
+  }
+
   // If we didn't escape or reprocess anything, then we don't need to use the
   // temporary string, just point to the original one. We know that this
   // is safe because unescaped strings are always shorter than their escaped
