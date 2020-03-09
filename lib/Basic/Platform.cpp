@@ -185,7 +185,6 @@ StringRef swift::getPlatformNameForTriple(const llvm::Triple &triple) {
   case llvm::Triple::RTEMS:
   case llvm::Triple::NaCl:
   case llvm::Triple::CNK:
-  case llvm::Triple::AIX:
   case llvm::Triple::CUDA:
   case llvm::Triple::NVCL:
   case llvm::Triple::AMDHSA:
@@ -224,6 +223,8 @@ StringRef swift::getPlatformNameForTriple(const llvm::Triple &triple) {
     return "ps4";
   case llvm::Triple::Haiku:
     return "haiku";
+  case llvm::Triple::AIX:
+    return "aix";
   case llvm::Triple::WASI:
     return "wasi";
   }

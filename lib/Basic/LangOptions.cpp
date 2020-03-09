@@ -288,6 +288,9 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
   case llvm::Triple::WASI:
     addPlatformConditionValue(PlatformConditionKind::OS, "WASI");
     break;
+  case llvm::Triple::AIX:
+    addPlatformConditionValue(PlatformConditionKind::OS, "AIX");
+    break;
   default:
     UnsupportedOS = true;
     break;
@@ -303,6 +306,9 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
     break;
   case llvm::Triple::ArchType::aarch64:
     addPlatformConditionValue(PlatformConditionKind::Arch, "arm64");
+    break;
+  case llvm::Triple::ArchType::ppc:
+    addPlatformConditionValue(PlatformConditionKind::Arch, "powerpc");
     break;
   case llvm::Triple::ArchType::ppc64:
     addPlatformConditionValue(PlatformConditionKind::Arch, "powerpc64");
@@ -341,6 +347,7 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
   case llvm::Triple::ArchType::x86_64:
     addPlatformConditionValue(PlatformConditionKind::Endianness, "little");
     break;
+  case llvm::Triple::ArchType::ppc:
   case llvm::Triple::ArchType::ppc64:
   case llvm::Triple::ArchType::systemz:
     addPlatformConditionValue(PlatformConditionKind::Endianness, "big");

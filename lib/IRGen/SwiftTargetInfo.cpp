@@ -122,6 +122,12 @@ static void configureARM(IRGenModule &IGM, const llvm::Triple &triple,
   setToMask(target.IsObjCPointerBit, 32, SWIFT_ABI_ARM_IS_OBJC_BIT);
 }
 
+static void configurePowerPC(IRGenModule &IGM, const llvm::Triple &triple,
+                             SwiftTargetInfo &target) {
+  setToMask(target.PointerSpareBits, 32,
+            SWIFT_ABI_ARM_SWIFT_SPARE_BITS_MASK);
+}
+
 /// Configures target-specific information for powerpc64 platforms.
 static void configurePowerPC64(IRGenModule &IGM, const llvm::Triple &triple,
                                SwiftTargetInfo &target) {
@@ -186,6 +192,10 @@ SwiftTargetInfo SwiftTargetInfo::get(IRGenModule &IGM) {
 
   case llvm::Triple::aarch64:
     configureARM64(IGM, triple, target);
+    break;
+
+  case llvm::Triple::ppc:
+    configurePowerPC(IGM, triple, target);
     break;
 
   case llvm::Triple::ppc64:
