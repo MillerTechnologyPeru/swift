@@ -1321,6 +1321,9 @@ emitAssociatedTypeMetadataRecord(const RootProtocolConformance *conformance) {
 }
 
 void IRGenModule::emitBuiltinReflectionMetadata() {
+  if (!IRGen.Opts.EnableReflectionMetadata)
+    return;
+
   if (getSwiftModule()->isStdlibModule()) {
     BuiltinTypes.insert(Context.TheNativeObjectType);
     BuiltinTypes.insert(Context.getAnyObjectType());
@@ -1423,6 +1426,9 @@ void IRGenModule::emitFieldDescriptor(const NominalTypeDecl *D) {
 }
 
 void IRGenModule::emitReflectionMetadataVersion() {
+  if (!IRGen.Opts.EnableReflectionMetadata)
+    return;
+
   auto Init =
     llvm::ConstantInt::get(Int16Ty, SWIFT_REFLECTION_METADATA_VERSION);
   auto Version = new llvm::GlobalVariable(Module, Int16Ty, /*constant*/ true,
