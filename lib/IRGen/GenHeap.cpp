@@ -408,8 +408,8 @@ static llvm::Function *createDtorFn(IRGenModule &IGM,
                                     const HeapLayout &layout) {
   llvm::Function *fn =
     llvm::Function::Create(IGM.DeallocatingDtorTy,
-                           llvm::Function::PrivateLinkage,
-                           "objectdestroy", &IGM.Module);
+                           llvm::Function::LinkOnceODRLinkage,
+                           "objectdestroy_" + std::to_string((intptr_t)layout.getType()), &IGM.Module);
   auto attrs = IGM.constructInitialAttributes();
   IGM.addSwiftSelfAttributes(attrs, 0);
   fn->setAttributes(attrs);
