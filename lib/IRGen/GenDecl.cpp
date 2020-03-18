@@ -908,9 +908,10 @@ std::string IRGenModule::GetObjCSectionName(StringRef Section,
   case llvm::Triple::ELF:
   case llvm::Triple::Wasm:
     return Section.substr(2).str();
-  case llvm::Triple::XCOFF:
   case llvm::Triple::COFF:
     return ("." + Section.substr(2) + "$B").str();
+  case llvm::Triple::XCOFF:
+    return "";
   }
 
   llvm_unreachable("unexpected object file format");
@@ -3232,9 +3233,11 @@ llvm::Constant *IRGenModule::emitSwiftProtocols() {
   case llvm::Triple::Wasm:
     sectionName = "swift5_protocols";
     break;
-  case llvm::Triple::XCOFF:
   case llvm::Triple::COFF:
     sectionName = ".sw5prt$B";
+    break;
+  case llvm::Triple::XCOFF:
+    sectionName = "";
     break;
   }
 
@@ -3293,9 +3296,11 @@ llvm::Constant *IRGenModule::emitProtocolConformances() {
   case llvm::Triple::Wasm:
     sectionName = "swift5_protocol_conformances";
     break;
-  case llvm::Triple::XCOFF:
   case llvm::Triple::COFF:
     sectionName = ".sw5prtc$B";
+    break;
+  case llvm::Triple::XCOFF:
+    sectionName = "";
     break;
   }
 
@@ -3319,9 +3324,11 @@ llvm::Constant *IRGenModule::emitTypeMetadataRecords() {
   case llvm::Triple::Wasm:
     sectionName = "swift5_type_metadata";
     break;
-  case llvm::Triple::XCOFF:
   case llvm::Triple::COFF:
     sectionName = ".sw5tymd$B";
+    break;
+  case llvm::Triple::XCOFF:
+    sectionName = "";
     break;
   case llvm::Triple::UnknownObjectFormat:
     llvm_unreachable("Don't know how to emit type metadata table for "
@@ -3388,9 +3395,11 @@ llvm::Constant *IRGenModule::emitFieldDescriptors() {
   case llvm::Triple::Wasm:
     sectionName = "swift5_fieldmd";
     break;
-  case llvm::Triple::XCOFF:
   case llvm::Triple::COFF:
     sectionName = ".sw5flmd$B";
+    break;
+  case llvm::Triple::XCOFF:
+    sectionName = "";
     break;
   case llvm::Triple::UnknownObjectFormat:
     llvm_unreachable("Don't know how to emit field records table for "

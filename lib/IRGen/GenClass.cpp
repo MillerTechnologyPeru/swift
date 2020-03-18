@@ -2030,6 +2030,7 @@ namespace {
         var->setSection("__DATA, __objc_const");
         break;
       case llvm::Triple::XCOFF:
+        break;
       case llvm::Triple::COFF:
         var->setSection(".data");
         break;

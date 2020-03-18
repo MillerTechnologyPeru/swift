@@ -1339,6 +1339,8 @@ bool IRGenModule::finalize() {
     case llvm::Triple::COFF:
       ModuleHash->setSection(".sw5hash");
       break;
+    case llvm::Triple::XCOFF:
+      break;
     default:
       llvm_unreachable("Don't know how to emit the module hash for the selected"
                        "object format.");

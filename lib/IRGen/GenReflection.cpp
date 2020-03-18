@@ -1189,6 +1189,9 @@ static std::string getReflectionSectionName(IRGenModule &IGM,
   case llvm::Triple::UnknownObjectFormat:
     llvm_unreachable("unknown object format");
   case llvm::Triple::XCOFF:
+    if (LongName == "typeref")
+      return ""; // explicit sections not supported
+    llvm_unreachable("reflection not supported");
   case llvm::Triple::COFF:
     assert(FourCC.size() <= 4 &&
            "COFF section name length must be <= 8 characters");
