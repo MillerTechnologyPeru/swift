@@ -664,7 +664,7 @@ getNormalInvocationArguments(std::vector<std::string> &invocationArgStrs,
       "-Xclang", "-detailed-preprocessing-record",
       "-Xclang", "-fmodule-format=raw",
     });
-  } else {
+  } else if (!triple.isOSBinFormatXCOFF()) {
     invocationArgStrs.insert(invocationArgStrs.end(), {
       "-Xclang", "-fmodule-format=obj",
     });
