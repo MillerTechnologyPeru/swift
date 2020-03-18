@@ -610,7 +610,10 @@ namespace {
     ProtocolDescriptorBuilder(IRGenModule &IGM, ProtocolDecl *Proto,
                                      SILDefaultWitnessTable *defaultWitnesses)
       : super(IGM), Proto(Proto), DefaultWitnesses(defaultWitnesses),
-        Resilient(IGM.isResilient(Proto, ResilienceExpansion::Minimal)) {}
+        Resilient(IGM.isResilient(Proto, ResilienceExpansion::Minimal)) {
+      if (!Resilient)
+        DefaultWitnesses = nullptr;
+    }
 
     void layout() {
       super::layout();
