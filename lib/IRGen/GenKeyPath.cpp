@@ -1301,6 +1301,8 @@ IRGenModule::getAddrOfKeyPathPattern(KeyPathPattern *pattern,
 }
 
 void IRGenModule::emitSILProperty(SILProperty *prop) {
+  return;
+
   if (prop->isTrivial()) {
     ++NumTrivialPropertyDescriptors;
     // All trivial property descriptors can share a single definition in the

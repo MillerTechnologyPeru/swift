@@ -18,6 +18,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/raw_sha1_ostream.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -403,13 +404,14 @@ void irgen::emitDeallocatePartialClassInstance(IRGenFunction &IGF,
 }
 
 /// Create the destructor function for a layout.
-/// TODO: give this some reasonable name and possibly linkage.
 static llvm::Function *createDtorFn(IRGenModule &IGM,
                                     const HeapLayout &layout) {
+  llvm::raw_sha1_ostream hashStream;
+  layout.getType()->print(hashStream);
   llvm::Function *fn =
     llvm::Function::Create(IGM.DeallocatingDtorTy,
                            llvm::Function::LinkOnceODRLinkage,
-                           "objectdestroy_" + std::to_string((intptr_t)layout.getType()), &IGM.Module);
+                           llvm::Twine("objectdestroy_") + hashStream.sha1(), &IGM.Module);
   auto attrs = IGM.constructInitialAttributes();
   IGM.addSwiftSelfAttributes(attrs, 0);
   fn->setAttributes(attrs);

@@ -509,7 +509,9 @@ emitGlobalList(IRGenModule &IGM, ArrayRef<llvm::WeakTrackingVH> handles,
                llvm::Type *eltTy,
                bool isConstant) {
   // Do nothing if the list is empty.
-  if (handles.empty()) return nullptr;
+  if (handles.empty() ||
+      IGM.TargetInfo.OutputObjectFormat == llvm::Triple::XCOFF) 
+    return nullptr;
 
   // For global lists that actually get linked (as opposed to notional
   // ones like @llvm.used), it's important to set an explicit alignment
@@ -3336,7 +3338,8 @@ llvm::Constant *IRGenModule::emitTypeMetadataRecords() {
   }
 
   // Do nothing if the list is empty.
-  if (RuntimeResolvableTypes.empty())
+  if (RuntimeResolvableTypes.empty() ||
+      TargetInfo.OutputObjectFormat == llvm::Triple::XCOFF)
     return nullptr;
 
   // Define the global variable for the conformance list.
@@ -3788,7 +3791,7 @@ llvm::GlobalValue *IRGenModule::defineTypeMetadata(CanType concreteType,
                                                         addr, indices);
   }
   addr = llvm::ConstantExpr::getBitCast(addr, TypeMetadataPtrTy);
-  return defineAlias(directEntity, addr);
+  return var; // FIXME: wrong!
 }
 
 /// Fetch the declaration of the (possibly uninitialized) metadata for a type.
@@ -4087,7 +4090,7 @@ llvm::GlobalValue *IRGenModule::defineProtocolRequirementsBaseDescriptor(
                                                 ProtocolDecl *proto,
                                                 llvm::Constant *definition) {
   auto entity = LinkEntity::forProtocolRequirementsBaseDescriptor(proto);
-  return defineAlias(entity, definition);
+  return nullptr;//defineAlias(entity, definition);
 }
 
 llvm::Constant *IRGenModule::getAddrOfAssociatedTypeDescriptor(
@@ -4101,7 +4104,7 @@ llvm::GlobalValue *IRGenModule::defineAssociatedTypeDescriptor(
                                                  AssociatedTypeDecl *assocType,
                                                  llvm::Constant *definition) {
   auto entity = LinkEntity::forAssociatedTypeDescriptor(assocType);
-  return defineAlias(entity, definition);
+  return nullptr;//defineAlias(entity, definition);
 }
 
 llvm::Constant *IRGenModule::getAddrOfAssociatedConformanceDescriptor(
@@ -4114,7 +4117,7 @@ llvm::GlobalValue *IRGenModule::defineAssociatedConformanceDescriptor(
                                             AssociatedConformance conformance,
                                             llvm::Constant *definition) {
   auto entity = LinkEntity::forAssociatedConformanceDescriptor(conformance);
-  return defineAlias(entity, definition);
+  return nullptr;//defineAlias(entity, definition);
 }
 
 llvm::Constant *IRGenModule::getAddrOfBaseConformanceDescriptor(
@@ -4127,7 +4130,7 @@ llvm::GlobalValue *IRGenModule::defineBaseConformanceDescriptor(
                                             BaseConformance conformance,
                                             llvm::Constant *definition) {
   auto entity = LinkEntity::forBaseConformanceDescriptor(conformance);
-  return defineAlias(entity, definition);
+  return nullptr;//defineAlias(entity, definition);
 }
 
 llvm::Constant *IRGenModule::getAddrOfProtocolConformanceDescriptor(
