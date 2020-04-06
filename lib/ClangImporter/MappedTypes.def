@@ -62,9 +62,6 @@ MAP_STDLIB_TYPE("ItemCount", UnsignedWord, 0, "Int", false, DoNothing)
 MAP_STDLIB_TYPE("ByteCount", UnsignedWord, 0, "Int", false, DoNothing)
 MAP_STDLIB_TYPE("UniCharCount", UnsignedWord, 0, "Int", false, DoNothing)
 
-MAP_TYPE("Boolean", UnsignedInt, 8, "Darwin", "DarwinBoolean", true,
-         DoNothing)
-
 
 // stdint.h types.
 MAP_STDLIB_TYPE("uint8_t",  UnsignedInt, 8,  "UInt8",  false, DoNothing)

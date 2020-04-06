@@ -301,6 +301,27 @@ getSwiftStdlibType(const clang::TypedefNameDecl *D,
       break;
     }
 
+    // We handle `Boolean` as a special case for both a proper modern macOS SDK
+    // as well as an MPW SDK with modules hacked in.
+    if (Name.str() == "Boolean") {
+      if (Impl.SwiftContext.LangOpts.Target.isOSDarwin()) {
+        SwiftModuleName = "Darwin";
+        SwiftTypeName = "DarwinBoolean";
+      } else {
+        SwiftModuleName = "MacTypes";
+        SwiftTypeName = "MacBoolean";
+      }
+      CTypeKind = MappedCTypeKind::UnsignedInt;
+      Bitwidth = 8;
+      IsSwiftModule = false;
+      NameMapping = MappedTypeNameKind::DoNothing;
+      CanBeMissing = true;
+      assert(verifyNameMapping(MappedTypeNameKind::DoNothing,
+                               "Boolean", SwiftTypeName) &&
+             "MappedTypes.def: Identical names must use DoNothing");
+      break;
+    }
+
     // We did not find this type, thus it is not mapped.
     return std::make_pair(Type(), "");
   } while (0);

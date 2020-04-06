@@ -104,6 +104,8 @@ public:
   Optional<SILDeclRef> ObjCBoolToBoolFn;
   Optional<SILDeclRef> BoolToDarwinBooleanFn;
   Optional<SILDeclRef> DarwinBooleanToBoolFn;
+  Optional<SILDeclRef> BoolToMacBooleanFn;
+  Optional<SILDeclRef> MacBooleanToBoolFn;
   Optional<SILDeclRef> NSErrorToErrorFn;
   Optional<SILDeclRef> ErrorToNSErrorFn;
   Optional<SILDeclRef> BoolToWindowsBoolFn;
@@ -355,6 +357,8 @@ public:
   SILDeclRef getObjCBoolToBoolFn();
   SILDeclRef getBoolToDarwinBooleanFn();
   SILDeclRef getDarwinBooleanToBoolFn();
+  SILDeclRef getBoolToMacBooleanFn();
+  SILDeclRef getMacBooleanToBoolFn();
   SILDeclRef getBoolToWindowsBoolFn();
   SILDeclRef getWindowsBoolToBoolFn();
   SILDeclRef getNSErrorToErrorFn();

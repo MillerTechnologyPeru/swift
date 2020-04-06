@@ -4115,6 +4115,12 @@ ASTContext::getForeignRepresentationInfo(NominalTypeDecl *nominal,
       addTrivial(getIdentifier("DarwinBoolean"), darwin);
     }
 
+    if (auto macTypes = getLoadedModule(Id_MacTypes)) {
+      // Note: DarwinBoolean is odd because it's bridged to Bool in APIs,
+      // but can also be trivially bridged.
+      addTrivial(getIdentifier("MacTypes"), macTypes);
+    }
+
     if (auto winsdk = getLoadedModule(Id_WinSDK)) {
       // NOTE: WindowsBool is odd because it is bridged to Bool in APIs, but can
       // also be trivially bridged.
@@ -4178,6 +4184,7 @@ ASTContext::getForeignRepresentationInfo(NominalTypeDecl *nominal,
     }
   };
   conditionallyAddTrivial(nominal, getIdentifier("DarwinBoolean") , Id_Darwin);
+  conditionallyAddTrivial(nominal, getIdentifier("MacBoolean") , Id_MacTypes);
   conditionallyAddTrivial(nominal, getIdentifier("WindowsBool"), Id_WinSDK);
   conditionallyAddTrivial(nominal, Id_Selector, Id_ObjectiveC, true);
   conditionallyAddTrivial(nominal, getIdentifier("ObjCBool"), Id_ObjectiveC);

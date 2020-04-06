@@ -47,11 +47,13 @@ BRIDGING_KNOWN_TYPE(Swift, String)
 BRIDGING_KNOWN_TYPE(ObjectiveC, ObjCBool)
 BRIDGING_KNOWN_TYPE(ObjectiveC, Selector)
 BRIDGING_KNOWN_TYPE(Darwin, DarwinBoolean)
+BRIDGING_KNOWN_TYPE(MacTypes, MacBoolean)
 BRIDGING_KNOWN_TYPE(Swift, Bool)
 BRIDGING_KNOWN_TYPE(Swift, Error)
 
 BRIDGE_TYPE(ObjectiveC, ObjCBool, Swift, Bool, false)
 BRIDGE_TYPE(Darwin, DarwinBoolean, Swift, Bool, false)
+BRIDGE_TYPE(MacTypes, MacBoolean, Swift, Bool, false)
 
 BRIDGING_KNOWN_TYPE(WinSDK, WindowsBool)
 BRIDGE_TYPE(WinSDK, WindowsBool, Swift, Bool, false)

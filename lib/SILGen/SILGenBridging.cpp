@@ -271,6 +271,18 @@ static ManagedValue emitBridgeBoolToDarwinBoolean(SILGenFunction &SGF,
   return SGF.emitManagedRValueWithCleanup(result);
 }
 
+static ManagedValue emitBridgeBoolToMacBoolean(SILGenFunction &SGF,
+                                                  SILLocation loc,
+                                                  ManagedValue swiftBool) {
+  // func _convertBoolToMacBoolean(Bool) -> MacBoolean
+  SILValue boolToMacBooleanFn
+    = SGF.emitGlobalFunctionRef(loc, SGF.SGM.getBoolToMacBooleanFn());
+
+  SILValue result = SGF.B.createApply(loc, boolToMacBooleanFn,
+                                      {}, swiftBool.forward(SGF));
+  return SGF.emitManagedRValueWithCleanup(result);
+}
+
 static ManagedValue emitBridgeBoolToWindowsBool(SILGenFunction &SGF,
                                                 SILLocation L, ManagedValue b) {
   // func _convertToWindowsBool(Bool) -> WindowsBool
@@ -1042,6 +1054,10 @@ static ManagedValue emitCBridgedToNativeValue(SILGenFunction &SGF,
     if (bridgedType == SGF.SGM.Types.getDarwinBooleanType()) {
       return emitBridgeForeignBoolToBool(SGF, loc, v,
                                          SGF.SGM.getDarwinBooleanToBoolFn());
+    }
+    if (bridgedType == SGF.SGM.Types.getMacBooleanType()) {
+      return emitBridgeForeignBoolToBool(SGF, loc, v,
+                                         SGF.SGM.getMacBooleanToBoolFn());
     }
     if (bridgedType == SGF.SGM.Types.getWindowsBoolType()) {
       return emitBridgeForeignBoolToBool(SGF, loc, v,
