@@ -2005,7 +2005,6 @@ static void emitInitializeFieldOffsetVector(IRGenFunction &IGF,
                                             llvm::Value *metadata,
                                             bool isVWTMutable,
                                        MetadataDependencyCollector *collector) {
-  return;
   auto &IGM = IGF.IGM;
 
   auto *target = T.getNominalOrBoundGenericNominal();
@@ -2497,7 +2496,6 @@ createSingletonInitializationMetadataAccessFunction(IRGenModule &IGM,
 /// Create an access function for the given non-generic type.
 static void createNonGenericMetadataAccessFunction(IRGenModule &IGM,
                                                    NominalTypeDecl *typeDecl) {
-  return;
   assert(!typeDecl->isGenericContext());
   auto type = typeDecl->getDeclaredType()->getCanonicalType();
 
@@ -4756,11 +4754,9 @@ GenericRequirementsMetadata irgen::addGenericRequirements(
           if (protocol->isObjC())
             tag |= 0x02;
           
-          B.addInt(IGM.RelativeAddressTy, tag);
-          
-          // B.addTaggedRelativeOffset(IGM.RelativeAddressTy,
-          //                           descriptorRef.getValue(),
-          //                           tag);
+          B.addTaggedRelativeOffset(IGM.RelativeAddressTy,
+                                    descriptorRef.getValue(),
+                                    tag);
         });
       break;
     }

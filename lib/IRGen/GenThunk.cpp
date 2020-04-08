@@ -121,7 +121,7 @@ llvm::GlobalValue *IRGenModule::defineMethodDescriptor(SILDeclRef declRef,
                                                        NominalTypeDecl *nominalDecl,
                                                        llvm::Constant *definition) {
   auto entity = LinkEntity::forMethodDescriptor(declRef);
-  return nullptr;//defineAlias(entity, definition);
+  return defineAlias(entity, definition);
 }
 
 /// Get or create a method descriptor variable.

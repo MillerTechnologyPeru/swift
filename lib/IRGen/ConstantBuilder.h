@@ -87,8 +87,7 @@ public:
 
   void addRelativeAddress(llvm::Constant *target) {
     assert(!isa<llvm::ConstantPointerNull>(target));
-    // addRelativeOffset(IGM().RelativeAddressTy, target);
-    addInt(IGM().RelativeAddressTy, 0);
+    addRelativeOffset(IGM().RelativeAddressTy, target);
   }
 
   /// Add a tagged relative reference to the given address.  The direct
@@ -96,10 +95,9 @@ public:
   /// a "GOT-equivalent", i.e. a pointer to an external object; if so,
   /// set the low bit of the offset to indicate that this is true.
   void addRelativeAddress(ConstantReference reference) {
-    // addTaggedRelativeOffset(IGM().RelativeAddressTy,
-    //                         reference.getValue(),
-    //                         unsigned(reference.isIndirect()));
-    addInt(IGM().RelativeAddressTy, 0);
+    addTaggedRelativeOffset(IGM().RelativeAddressTy,
+                            reference.getValue(),
+                            unsigned(reference.isIndirect()));
   }
 
   /// Add an indirect relative reference to the given address.
@@ -107,9 +105,8 @@ public:
   /// external object.
   void addIndirectRelativeAddress(ConstantReference reference) {
     assert(reference.isIndirect());
-    // addRelativeOffset(IGM().RelativeAddressTy,
-    //                   reference.getValue());
-    addInt(IGM().RelativeAddressTy, 0);
+    addRelativeOffset(IGM().RelativeAddressTy,
+                      reference.getValue());
   }
 
   Size getNextOffsetFromGlobal() const {

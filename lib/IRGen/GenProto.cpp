@@ -1473,12 +1473,11 @@ llvm::Constant *WitnessTableBuilderBase::getAssociatedConformanceWitness(
                                 AssociatedConformance requirement,
                                 CanType associatedType,
                                 ProtocolConformanceRef conformance) {
-  return llvm::Constant::getNullValue(IGM.Int8PtrTy);
-  // defineAssociatedTypeWitnessTableAccessFunction(requirement, associatedType,
-  //                                                conformance);
-  // assert(isa<NormalProtocolConformance>(Conformance) && "has associated type");
-  // auto conf = cast<NormalProtocolConformance>(&Conformance);
-  // return IGM.getMangledAssociatedConformance(conf, requirement);
+  defineAssociatedTypeWitnessTableAccessFunction(requirement, associatedType,
+                                                 conformance);
+  assert(isa<NormalProtocolConformance>(Conformance) && "has associated type");
+  auto conf = cast<NormalProtocolConformance>(&Conformance);
+  return IGM.getMangledAssociatedConformance(conf, requirement);
 }
 
 void WitnessTableBuilderBase::defineAssociatedTypeWitnessTableAccessFunction(
