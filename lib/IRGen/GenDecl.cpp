@@ -3158,6 +3158,16 @@ IRGenModule::emitRelativeReference(ConstantReference target,
   return relativeAddr;
 }
 
+llvm::Constant *IRGenModule::getAddrOfTransitionVector(llvm::Function *target) {
+  assert(Triple.isOSAIX());
+  auto *transitionVector =
+      new llvm::GlobalVariable(Module, target->getType(), /*isConstant*/true,
+                               llvm::GlobalValue::PrivateLinkage,
+                               target, llvm::Twine("toc.") + target->getName());
+  transitionVector->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  return transitionVector;
+}
+
 /// Form an LLVM constant for the relative distance between a reference
 /// (appearing at gep (0, indices...) of `base`) and `target`.  For now,
 /// for this to succeed portably, both need to be globals defined in the
@@ -3166,6 +3176,9 @@ llvm::Constant *
 IRGenModule::emitDirectRelativeReference(llvm::Constant *target,
                                          llvm::Constant *base,
                                          ArrayRef<unsigned> baseIndices) {
+  if (Triple.isOSAIX() && isa<llvm::Function>(target))
+    target = getAddrOfTransitionVector(cast<llvm::Function>(target));
+
   // Convert the target to an integer.
   auto targetAddr = llvm::ConstantExpr::getPtrToInt(target, SizeTy);
 

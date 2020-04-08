@@ -1526,6 +1526,14 @@ public:
                               llvm::Constant *base,
                               ArrayRef<unsigned> baseIndices);
 
+  /// Emits an anonymous global containing the AIX/PPC transition vector for
+  /// \p target.
+  ///
+  /// This is how function pointers work on AIX: they contain both the function
+  /// address and the "table of contents" address for relative access to
+  /// globals.
+  llvm::Constant *getAddrOfTransitionVector(llvm::Function *target);
+
   /// Mark a global variable as true-const by putting it in the text section of
   /// the binary.
   void setTrueConstGlobal(llvm::GlobalVariable *var);

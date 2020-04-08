@@ -87,6 +87,8 @@ public:
 
   void addRelativeAddress(llvm::Constant *target) {
     assert(!isa<llvm::ConstantPointerNull>(target));
+    if (IGM().Triple.isOSAIX() && isa<llvm::Function>(target))
+      target = IGM().getAddrOfTransitionVector(cast<llvm::Function>(target));
     addRelativeOffset(IGM().RelativeAddressTy, target);
   }
 
@@ -95,8 +97,11 @@ public:
   /// a "GOT-equivalent", i.e. a pointer to an external object; if so,
   /// set the low bit of the offset to indicate that this is true.
   void addRelativeAddress(ConstantReference reference) {
+    llvm::Constant *target = reference.getValue();
+    if (IGM().Triple.isOSAIX() && isa<llvm::Function>(target))
+      target = IGM().getAddrOfTransitionVector(cast<llvm::Function>(target));
     addTaggedRelativeOffset(IGM().RelativeAddressTy,
-                            reference.getValue(),
+                            target,
                             unsigned(reference.isIndirect()));
   }
 
