@@ -103,6 +103,14 @@ namespace swift {
     InlineTreePrinter() : llvm::ModulePass(ID) {}
   };
 
+  class XCOFFRelativeReferencedConstantDemotion : public llvm::ModulePass {
+    virtual void getAnalysisUsage(llvm::AnalysisUsage &AU) const override;
+    virtual bool runOnModule(llvm::Module &M) override;
+  public:
+    static char ID;
+    XCOFFRelativeReferencedConstantDemotion() : llvm::ModulePass(ID) {}
+  };
+
 } // end namespace swift
 
 #endif

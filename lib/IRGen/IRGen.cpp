@@ -311,6 +311,9 @@ void swift::performLLVMOptimizations(const IRGenOptions &Opts,
   if (Opts.PrintInlineTree)
     ModulePasses.add(createInlineTreePrinterPass());
 
+  if (TargetMachine->getTargetTriple().isOSBinFormatXCOFF())
+    ModulePasses.add(createXCOFFRelativeReferencedConstantDemotionPass());
+
   // Do it.
   ModulePasses.run(*Module);
 
