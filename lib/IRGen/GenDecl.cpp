@@ -980,20 +980,23 @@ void IRGenModule::emitGlobalLists() {
 
   // @llvm.used
 
-  // Collect llvm.used globals already in the module (coming from ClangCodeGen).
-  collectGlobalList(*this, LLVMUsed, "llvm.used");
-  emitGlobalList(*this, LLVMUsed, "llvm.used", "llvm.metadata",
-                 llvm::GlobalValue::AppendingLinkage,
-                 Int8PtrTy,
-                 false);
+  // FIXME: The PPC/XCOFF/AIX backend doesn't support these yet.
+  if (!Triple.isOSBinFormatXCOFF()) {
+    // Collect llvm.used globals already in the module (coming from ClangCodeGen).
+    collectGlobalList(*this, LLVMUsed, "llvm.used");
+    emitGlobalList(*this, LLVMUsed, "llvm.used", "llvm.metadata",
+                   llvm::GlobalValue::AppendingLinkage,
+                   Int8PtrTy,
+                   false);
 
-  // Collect llvm.compiler.used globals already in the module (coming
-  // from ClangCodeGen).
-  collectGlobalList(*this, LLVMCompilerUsed, "llvm.compiler.used");
-  emitGlobalList(*this, LLVMCompilerUsed, "llvm.compiler.used", "llvm.metadata",
-                 llvm::GlobalValue::AppendingLinkage,
-                 Int8PtrTy,
-                 false);
+    // Collect llvm.compiler.used globals already in the module (coming
+    // from ClangCodeGen).
+    collectGlobalList(*this, LLVMCompilerUsed, "llvm.compiler.used");
+    emitGlobalList(*this, LLVMCompilerUsed, "llvm.compiler.used", "llvm.metadata",
+                   llvm::GlobalValue::AppendingLinkage,
+                   Int8PtrTy,
+                   false);
+  }
 }
 
 static bool hasCodeCoverageInstrumentation(SILFunction &f, SILModule &m) {
