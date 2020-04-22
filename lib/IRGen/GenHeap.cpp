@@ -411,7 +411,7 @@ static llvm::Function *createDtorFn(IRGenModule &IGM,
   llvm::Function *fn =
     llvm::Function::Create(IGM.DeallocatingDtorTy,
                            llvm::Function::LinkOnceODRLinkage,
-                           llvm::Twine("objectdestroy_") + hashStream.sha1(), &IGM.Module);
+                           llvm::Twine("objectdestroy_") + toHex(hashStream.sha1()), &IGM.Module);
   auto attrs = IGM.constructInitialAttributes();
   IGM.addSwiftSelfAttributes(attrs, 0);
   fn->setAttributes(attrs);
