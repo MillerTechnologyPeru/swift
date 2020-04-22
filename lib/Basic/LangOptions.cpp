@@ -52,6 +52,7 @@ static const SupportedConditionalValue SupportedConditionalCompilationOSs[] = {
   "Cygwin",
   "Haiku",
   "WASI",
+  "AIX",
 };
 
 static const SupportedConditionalValue SupportedConditionalCompilationArches[] = {
@@ -59,6 +60,7 @@ static const SupportedConditionalValue SupportedConditionalCompilationArches[] =
   "arm64",
   "i386",
   "x86_64",
+  "powerpc",
   "powerpc64",
   "powerpc64le",
   "s390x",
