@@ -222,7 +222,7 @@ getTypeRefByFunction(IRGenModule &IGM,
       auto fnTy = llvm::FunctionType::get(IGM.TypeMetadataPtrTy,
                                           {IGM.Int8PtrTy}, /*vararg*/ false);
       accessor =
-        llvm::Function::Create(fnTy, llvm::GlobalValue::PrivateLinkage,
+        llvm::Function::Create(fnTy, llvm::GlobalValue::LinkOnceODRLinkage,
                                symbolName, IGM.getModule());
       accessor->setAttributes(IGM.constructInitialAttributes());
       
@@ -285,6 +285,16 @@ getTypeRefImpl(IRGenModule &IGM,
     // in-process.
     IGM.IRGen.noteUseOfTypeMetadata(type);
     
+    // Force AIX (Mac OS 9) targets to use instantiation functions whenever possible.
+    if (IGM.Triple.isOSAIX()) {
+      Type substT = sig
+        ? sig->getGenericEnvironment()->mapTypeIntoContext(type)
+        : type;
+      if (!substT->hasTypeParameter()) {
+        return getTypeRefByFunction(IGM, sig, type);
+      }
+    }
+
     // If the minimum deployment target's runtime demangler wouldn't understand
     // this mangled name, then fall back to generating a "mangled name" with a
     // symbolic reference with a callback function.
