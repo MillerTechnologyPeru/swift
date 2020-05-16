@@ -101,8 +101,8 @@ protected:
 
   FulfillmentMap Fulfillments;
 
-  GenericSignature::ConformsToArray getConformsTo(Type t) {
-    return Generics->getConformsTo(t);
+  GenericSignature::RequiredProtocols getRequiredProtocols(Type t) {
+    return Generics->getRequiredProtocols(t);
   }
 
   CanType getSuperclassBound(Type t) {
@@ -166,9 +166,9 @@ private:
     bool hasLimitedInterestingConformances(CanType type) const override {
       return true;
     }
-    GenericSignature::ConformsToArray
+    GenericSignature::RequiredProtocols
     getInterestingConformances(CanType type) const override {
-      return Self.getConformsTo(type);
+      return Self.getRequiredProtocols(type);
     }
     CanType getSuperclassBound(CanType type) const override {
       return Self.getSuperclassBound(type);
@@ -326,7 +326,8 @@ bool PolymorphicConvention::considerType(CanType type, IsExact_t isExact,
 }
 
 void PolymorphicConvention::considerWitnessSelf(CanSILFunctionType fnType) {
-  CanType selfTy = fnType->getSelfInstanceType(IGM.getSILModule());
+  CanType selfTy = fnType->getSelfInstanceType(
+      IGM.getSILModule(), IGM.getMaximalTypeExpansionContext());
   auto conformance = fnType->getWitnessMethodConformanceOrInvalid();
 
   // First, bind type metadata for Self.
@@ -351,7 +352,8 @@ void PolymorphicConvention::considerWitnessSelf(CanSILFunctionType fnType) {
 
 void PolymorphicConvention::considerObjCGenericSelf(CanSILFunctionType fnType) {
   // If this is a static method, get the instance type.
-  CanType selfTy = fnType->getSelfInstanceType(IGM.getSILModule());
+  CanType selfTy = fnType->getSelfInstanceType(
+      IGM.getSILModule(), IGM.getMaximalTypeExpansionContext());
   unsigned paramIndex = fnType->getParameters().size() - 1;
 
   // Bind type metadata for Self.
@@ -368,7 +370,8 @@ void PolymorphicConvention::considerObjCGenericSelf(CanSILFunctionType fnType) {
 void PolymorphicConvention::considerParameter(SILParameterInfo param,
                                               unsigned paramIndex,
                                               bool isSelfParameter) {
-  auto type = param.getArgumentType(IGM.getSILModule(), FnType);
+  auto type = param.getArgumentType(IGM.getSILModule(), FnType,
+                                    IGM.getMaximalTypeExpansionContext());
   switch (param.getConvention()) {
       // Indirect parameters do give us a value we can use, but right now
       // we don't bother, for no good reason. But if this is 'self',
@@ -518,8 +521,8 @@ CanType EmitPolymorphicParameters::getTypeInContext(CanType type) const {
 }
 
 CanType EmitPolymorphicParameters::getArgTypeInContext(unsigned paramIndex) const {
-  return getTypeInContext(FnType->getParameters()[paramIndex]
-                          .getArgumentType(IGM.getSILModule(), FnType));
+  return getTypeInContext(FnType->getParameters()[paramIndex].getArgumentType(
+      IGM.getSILModule(), FnType, IGM.getMaximalTypeExpansionContext()));
 }
 
 void EmitPolymorphicParameters::bindExtraSource(const MetadataSource &source,
@@ -548,7 +551,8 @@ void EmitPolymorphicParameters::bindExtraSource(const MetadataSource &source,
       assert(metadata && "no Self metadata for witness method");
 
       // Mark this as the cached metatype for Self.
-      auto selfTy = FnType->getSelfInstanceType(IGM.getSILModule());
+      auto selfTy = FnType->getSelfInstanceType(
+          IGM.getSILModule(), IGM.getMaximalTypeExpansionContext());
       CanType argTy = getTypeInContext(selfTy);
       setTypeMetadataName(IGF.IGM, metadata, argTy);
       auto *CD = selfTy.getClassOrBoundGenericClass();
@@ -571,7 +575,8 @@ void EmitPolymorphicParameters::bindExtraSource(const MetadataSource &source,
       auto conformance = FnType->getWitnessMethodConformanceOrInvalid();
       auto selfProto = conformance.getRequirement();
 
-      auto selfTy = FnType->getSelfInstanceType(IGM.getSILModule());
+      auto selfTy = FnType->getSelfInstanceType(
+          IGM.getSILModule(), IGM.getMaximalTypeExpansionContext());
       CanType argTy = getTypeInContext(selfTy);
 
       setProtocolWitnessTableName(IGF.IGM, selfTable, argTy, selfProto);
@@ -702,8 +707,8 @@ void BindPolymorphicParameter::emit(Explosion &nativeParam, unsigned paramIndex)
     return;
 
   assert(nativeParam.size() == 1);
-  auto paramType = SubstFnType->getParameters()[paramIndex]
-                            .getArgumentType(IGM.getSILModule(), SubstFnType);
+  auto paramType = SubstFnType->getParameters()[paramIndex].getArgumentType(
+      IGM.getSILModule(), SubstFnType, IGM.getMaximalTypeExpansionContext());
   llvm::Value *instanceRef = nativeParam.getAll()[0];
   SILType instanceType = SILType::getPrimitiveObjectType(paramType);
   llvm::Value *metadata =
@@ -792,20 +797,19 @@ namespace {
     }
 
     void addMethod(SILDeclRef func) {
-      auto decl = cast<AbstractFunctionDecl>(func.getDecl());
       // If this assert needs to be changed, be sure to also change
       // ProtocolDescriptorBuilder::getRequirementInfo.
-      assert((isa<ConstructorDecl>(decl)
-                ? (func.kind == SILDeclRef::Kind::Allocator)
-                : (func.kind == SILDeclRef::Kind::Func))
-             && "unexpected kind for protocol witness declaration ref");
-      Entries.push_back(WitnessTableEntry::forFunction(decl));
+      assert((isa<ConstructorDecl>(func.getDecl())
+                  ? (func.kind == SILDeclRef::Kind::Allocator)
+                  : (func.kind == SILDeclRef::Kind::Func)) &&
+             "unexpected kind for protocol witness declaration ref");
+      Entries.push_back(WitnessTableEntry::forFunction(func));
     }
 
     void addPlaceholder(MissingMemberDecl *placeholder) {
       for (auto i : range(placeholder->getNumberOfVTableEntries())) {
         (void)i;
-        Entries.push_back(WitnessTableEntry());
+        Entries.push_back(WitnessTableEntry::forPlaceholder());
       }
     }
 
@@ -1199,7 +1203,7 @@ public:
           bool hasLimitedInterestingConformances(CanType type) const override {
             return false;
           }
-          GenericSignature::ConformsToArray
+          GenericSignature::RequiredProtocols
           getInterestingConformances(CanType type) const override {
             llvm_unreachable("no limits");
           }
@@ -1318,8 +1322,7 @@ public:
              && "sil witness table does not match protocol");
       assert(entry.getMethodWitness().Requirement == requirement
              && "sil witness table does not match protocol");
-      auto piIndex =
-        PI.getFunctionIndex(cast<AbstractFunctionDecl>(requirement.getDecl()));
+      auto piIndex = PI.getFunctionIndex(requirement);
       assert((size_t)piIndex.getValue() ==
               Table.size() - WitnessTableFirstRequirementOffset &&
              "offset doesn't match ProtocolInfo layout");
@@ -2739,12 +2742,8 @@ static void addAbstractConditionalRequirements(
     SpecializedProtocolConformance *specializedConformance,
     llvm::SetVector<GenericRequirement> &requirements) {
   auto subMap = specializedConformance->getSubstitutionMap();
-  auto condRequirements =
-      specializedConformance->getConditionalRequirementsIfAvailable();
-  if (!condRequirements)
-    return;
-
-  for (auto req : *condRequirements) {
+  auto condRequirements = specializedConformance->getConditionalRequirements();
+  for (auto req : condRequirements) {
     if (req.getKind() != RequirementKind::Conformance)
       continue;
     auto *proto =
@@ -2849,7 +2848,8 @@ static CanType getSubstSelfType(IRGenModule &IGM,
   assert(!origFnType->getParameters().empty());
 
   auto selfParam = origFnType->getParameters().back();
-  CanType inputType = selfParam.getArgumentType(IGM.getSILModule(), origFnType);
+  CanType inputType = selfParam.getArgumentType(
+      IGM.getSILModule(), origFnType, IGM.getMaximalTypeExpansionContext());
   // If the parameter is a direct metatype parameter, this is a static method
   // of the instance type. We can assume this because:
   // - metatypes cannot directly conform to protocols
@@ -3277,7 +3277,7 @@ FunctionPointer irgen::emitWitnessMethodValue(IRGenFunction &IGF,
 
   // Find the witness we're interested in.
   auto &fnProtoInfo = IGF.IGM.getProtocolInfo(proto, ProtocolInfoKind::Full);
-  auto index = fnProtoInfo.getFunctionIndex(fn);
+  auto index = fnProtoInfo.getFunctionIndex(member);
   llvm::Value *slot;
   llvm::Value *witnessFnPtr =
     emitInvariantLoadOfOpaqueWitness(IGF, wtable,

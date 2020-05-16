@@ -405,9 +405,6 @@ void Constraint::print(llvm::raw_ostream &Out, SourceManager *sm) const {
     case OverloadChoiceKind::KeyPathDynamicMemberLookup:
       Out << "dynamic member lookup '" << overload.getName() << "'";
       break;
-    case OverloadChoiceKind::BaseType:
-      Out << "base type";
-      break;
     case OverloadChoiceKind::TupleIndex:
       Out << "tuple index " << overload.getTupleIndex();
       break;
@@ -430,7 +427,7 @@ void Constraint::print(llvm::raw_ostream &Out, SourceManager *sm) const {
   case ConstraintKind::ValueWitness: {
     auto requirement = getRequirement();
     auto selfNominal = requirement->getDeclContext()->getSelfNominalTypeDecl();
-    Out << "[." << selfNominal->getName() << "::" << requirement->getFullName()
+    Out << "[." << selfNominal->getName() << "::" << requirement->getName()
         << ": witness] == ";
     break;
   }
@@ -598,10 +595,8 @@ static void uniqueTypeVariables(SmallVectorImpl<TypeVariableType *> &typeVars) {
 bool Constraint::isExplicitConversion() const {
   assert(Kind == ConstraintKind::Disjunction);
 
-  if (auto *locator = getLocator()) {
-    if (auto anchor = locator->getAnchor())
-      return isa<CoerceExpr>(anchor);
-  }
+  if (auto *locator = getLocator())
+    return isExpr<CoerceExpr>(locator->getAnchor());
 
   return false;
 }

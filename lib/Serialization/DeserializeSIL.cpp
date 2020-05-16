@@ -1042,7 +1042,8 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
   Builder.setInsertionPoint(BB);
   Builder.setCurrentDebugScope(Fn->getDebugScope());
   unsigned RawOpCode = 0, TyCategory = 0, TyCategory2 = 0, TyCategory3 = 0,
-           Attr = 0, NumSubs = 0, NumConformances = 0, IsNonThrowingApply = 0;
+           Attr = 0, Attr2 = 0, NumSubs = 0, NumConformances = 0,
+           IsNonThrowingApply = 0;
   ValueID ValID, ValID2, ValID3;
   TypeID TyID, TyID2, TyID3;
   TypeID ConcreteTyID;
@@ -1145,6 +1146,29 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
         scratch, TyID, TyCategory, Attr, TyID2, TyCategory2, TyID3,
         TyCategory3, ValID3, ListOfValues);
     RawOpCode = (unsigned)SILInstructionKind::WitnessMethodInst;
+    break;
+  case SIL_INST_DIFFERENTIABLE_FUNCTION:
+    SILInstDifferentiableFunctionLayout::readRecord(
+        scratch, /*numParams*/ Attr, /*hasDerivativeFunctions*/ Attr2,
+        ListOfValues);
+    RawOpCode = (unsigned)SILInstructionKind::DifferentiableFunctionInst;
+    break;
+  case SIL_INST_LINEAR_FUNCTION:
+    SILInstLinearFunctionLayout::readRecord(
+        scratch, /*numParams*/ Attr, /*hasTransposeFunction*/ Attr2,
+        ListOfValues);
+    RawOpCode = (unsigned)SILInstructionKind::LinearFunctionInst;
+    break;
+  case SIL_INST_DIFFERENTIABLE_FUNCTION_EXTRACT:
+    SILInstDifferentiableFunctionExtractLayout::readRecord(
+        scratch, TyID, TyCategory, ValID, /*extractee*/ Attr,
+        /*hasExplicitExtracteeType*/ Attr2);
+    RawOpCode = (unsigned)SILInstructionKind::DifferentiableFunctionExtractInst;
+    break;
+  case SIL_INST_LINEAR_FUNCTION_EXTRACT:
+    SILInstLinearFunctionExtractLayout::readRecord(
+        scratch, TyID, TyCategory, ValID, /*extractee*/ Attr);
+    RawOpCode = (unsigned)SILInstructionKind::LinearFunctionExtractInst;
     break;
   }
 
@@ -1435,7 +1459,8 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
     SmallVector<SILValue, 4> Args;
     for (unsigned I = 0, E = ListOfValues.size(); I < E; I++)
       Args.push_back(getLocalValue(ListOfValues[I],
-                                   substConventions.getSILArgumentType(I)));
+                                   substConventions.getSILArgumentType(
+                                       I, Builder.getTypeExpansionContext())));
     SubstitutionMap Substitutions = MF->getSubstitutionMap(NumSubs);
 
     if (OpCode == SILInstructionKind::ApplyInst) {
@@ -1471,7 +1496,8 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
     SmallVector<SILValue, 4> Args;
     for (unsigned I = 0, E = ListOfValues.size(); I < E; I++)
       Args.push_back(getLocalValue(ListOfValues[I],
-                                   substConventions.getSILArgumentType(I)));
+                                   substConventions.getSILArgumentType(
+                                       I, Builder.getTypeExpansionContext())));
     SubstitutionMap Substitutions = MF->getSubstitutionMap(NumSubs);
 
     ResultVal = Builder.createTryApply(Loc, getLocalValue(ValID, FnTy),
@@ -1503,7 +1529,9 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
     unsigned unappliedArgs = numArgs - ListOfValues.size();
     for (unsigned I = 0, E = ListOfValues.size(); I < E; I++)
       Args.push_back(getLocalValue(
-          ListOfValues[I], fnConv.getSILArgumentType(I + unappliedArgs)));
+          ListOfValues[I],
+          fnConv.getSILArgumentType(I + unappliedArgs,
+                                    Builder.getTypeExpansionContext())));
     auto onStack = closureTy.castTo<SILFunctionType>()->isNoEscape()
                        ? PartialApplyInst::OnStackKind::OnStack
                        : PartialApplyInst::OnStackKind::NotOnStack;
@@ -1806,6 +1834,28 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
         getLocalValue(ValID, getSILType(MF->getType(TyID),
                                         (SILValueCategory)TyCategory, Fn)),
         verificationType);
+    break;
+  }
+
+  case SILInstructionKind::BeginCOWMutationInst: {
+    assert(RecordKind == SIL_ONE_OPERAND && "Layout should be OneOperand.");
+    unsigned isNative = Attr;
+    ResultVal = Builder.createBeginCOWMutation(
+        Loc,
+        getLocalValue(ValID,
+            getSILType(MF->getType(TyID), (SILValueCategory)TyCategory, Fn)),
+        isNative != 0);
+    break;
+  }
+
+  case SILInstructionKind::EndCOWMutationInst: {
+    assert(RecordKind == SIL_ONE_OPERAND && "Layout should be OneOperand.");
+    unsigned keepUnique = Attr;
+    ResultVal = Builder.createEndCOWMutation(
+        Loc,
+        getLocalValue(ValID, getSILType(MF->getType(TyID),
+                                        (SILValueCategory)TyCategory, Fn)),
+        keepUnique != 0);
     break;
   }
 
@@ -2270,19 +2320,19 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
     auto ResultTy = Val->getType().getFieldType(
         Field, SILMod, Builder.getTypeExpansionContext());
     ResultVal = Builder.createRefElementAddr(Loc, Val, Field,
-                                             ResultTy);
+                                          ResultTy, /*Immutable*/ Attr & 0x1);
     break;
   }
   case SILInstructionKind::RefTailAddrInst: {
     assert(RecordKind == SIL_ONE_TYPE_ONE_OPERAND &&
            "Layout should be OneTypeOneOperand.");
-    assert(Attr == 0);
     assert((SILValueCategory)TyCategory == SILValueCategory::Address);
     ResultVal = Builder.createRefTailAddr(
         Loc,
         getLocalValue(ValID, getSILType(MF->getType(TyID2),
                                         (SILValueCategory)TyCategory2, Fn)),
-        getSILType(MF->getType(TyID), SILValueCategory::Address, Fn));
+        getSILType(MF->getType(TyID), SILValueCategory::Address, Fn),
+        /*Immutable*/ Attr & 0x1);
     break;
   }
   case SILInstructionKind::ClassMethodInst:
@@ -2567,6 +2617,76 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
     }
     
     ResultVal = Builder.createKeyPath(Loc, pattern, subMap, operands, kpTy);
+    break;
+  }
+  case SILInstructionKind::DifferentiableFunctionInst: {
+    bool hasDerivativeFunctions = (bool)Attr2;
+    unsigned numOperands = hasDerivativeFunctions ? 3 : 1;
+    auto numParamIndices = ListOfValues.size() - numOperands * 3;
+    assert(ListOfValues.size() == numParamIndices + numOperands * 3);
+    auto rawParamIndices =
+        map<SmallVector<unsigned, 8>>(ListOfValues.take_front(numParamIndices),
+                                      [](uint64_t i) { return (unsigned)i; });
+    auto numParams = Attr;
+    auto *paramIndices =
+        IndexSubset::get(MF->getContext(), numParams, rawParamIndices);
+    SmallVector<SILValue, 3> operands;
+    for (auto i = numParamIndices; i < numParamIndices + numOperands * 3;
+         i += 3) {
+      auto astTy = MF->getType(ListOfValues[i]);
+      auto silTy = getSILType(astTy, (SILValueCategory)ListOfValues[i + 1], Fn);
+      operands.push_back(getLocalValue(ListOfValues[i + 2], silTy));
+    }
+    Optional<std::pair<SILValue, SILValue>> derivativeFunctions = None;
+    if (hasDerivativeFunctions)
+      derivativeFunctions = std::make_pair(operands[1], operands[2]);
+    ResultVal = Builder.createDifferentiableFunction(
+        Loc, paramIndices, operands[0], derivativeFunctions);
+    break;
+  }
+  case SILInstructionKind::LinearFunctionInst: {
+    bool hasLinearFunction = (bool)Attr2;
+    unsigned numOperands = hasLinearFunction ? 2 : 1;
+    auto numParamIndices = ListOfValues.size() - numOperands * 3;
+    assert(ListOfValues.size() == numParamIndices + numOperands * 3);
+    auto rawParamIndices =
+       map<SmallVector<unsigned, 8>>(ListOfValues.take_front(numParamIndices),
+                                     [](uint64_t i) { return (unsigned)i; });
+    auto numParams = Attr;
+    auto *paramIndices =
+        IndexSubset::get(MF->getContext(), numParams, rawParamIndices);
+    SmallVector<SILValue, 3> operands;
+    for (auto i = numParamIndices;
+         i < numParamIndices + numOperands * 3; i += 3) {
+      auto astTy = MF->getType(ListOfValues[i]);
+      auto silTy = getSILType(astTy, (SILValueCategory)ListOfValues[i+1], Fn);
+      operands.push_back(getLocalValue(ListOfValues[i+2], silTy));
+    }
+    Optional<SILValue> transposeFunction = None;
+    if (hasLinearFunction)
+      transposeFunction = operands[1];
+    ResultVal = Builder.createLinearFunction(
+        Loc, paramIndices, operands[0], transposeFunction);
+    break;
+  }
+  case SILInstructionKind::DifferentiableFunctionExtractInst: {
+    auto astTy = MF->getType(TyID);
+    auto silTy = getSILType(astTy, SILValueCategory::Object, Fn);
+    auto val = getLocalValue(ValID, silTy);
+    NormalDifferentiableFunctionTypeComponent extractee(Attr);
+    Optional<SILType> explicitExtracteeType = None;
+    if (Attr2)
+      explicitExtracteeType = silTy;
+    ResultVal = Builder.createDifferentiableFunctionExtract(
+        Loc, extractee, val, explicitExtracteeType);
+    break;
+  }
+  case SILInstructionKind::LinearFunctionExtractInst: {
+    auto astTy = MF->getType(TyID);
+    auto silTy = getSILType(astTy, SILValueCategory::Object, Fn);
+    auto val = getLocalValue(ValID, silTy);
+    LinearDifferentiableFunctionTypeComponent extractee(Attr);
+    ResultVal = Builder.createLinearFunctionExtract(Loc, extractee, val);
     break;
   }
   case SILInstructionKind::DifferentiabilityWitnessFunctionInst: {
@@ -3479,19 +3599,22 @@ SILDeserializer::readDifferentiabilityWitness(DeclID DId) {
   }
   auto derivativeGenSig = MF->getGenericSignature(derivativeGenSigID);
 
+  auto originalFnType = original->getLoweredFunctionType();
   SmallVector<unsigned, 8> parameterAndResultIndices(
       rawParameterAndResultIndices.begin(), rawParameterAndResultIndices.end());
   assert(parameterAndResultIndices.size() ==
              numParameterIndices + numResultIndices &&
          "Parameter/result indices count mismatch");
-  auto *parameterIndices = IndexSubset::get(
-      MF->getContext(), original->getLoweredFunctionType()->getNumParameters(),
-      ArrayRef<unsigned>(parameterAndResultIndices)
-          .take_front(numParameterIndices));
-  auto *resultIndices = IndexSubset::get(
-      MF->getContext(), original->getLoweredFunctionType()->getNumResults(),
-      ArrayRef<unsigned>(parameterAndResultIndices)
-          .take_back(numResultIndices));
+  auto *parameterIndices =
+      IndexSubset::get(MF->getContext(), originalFnType->getNumParameters(),
+                       ArrayRef<unsigned>(parameterAndResultIndices)
+                           .take_front(numParameterIndices));
+  auto numResults = originalFnType->getNumResults() +
+                    originalFnType->getNumIndirectMutatingParameters();
+  auto *resultIndices =
+      IndexSubset::get(MF->getContext(), numResults,
+                       ArrayRef<unsigned>(parameterAndResultIndices)
+                           .take_back(numResultIndices));
 
   AutoDiffConfig config(parameterIndices, resultIndices, derivativeGenSig);
   auto *diffWitness =

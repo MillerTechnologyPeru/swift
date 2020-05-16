@@ -629,6 +629,8 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
     return SILLinkage::Private;
 
   case Kind::DynamicallyReplaceableFunctionKey:
+    return getSILFunction()->getLinkage();
+
   case Kind::SILFunction:
     return getSILFunction()->getEffectiveSymbolLinkage();
 
@@ -736,6 +738,7 @@ bool LinkEntity::isContextDescriptor() const {
   case Kind::DifferentiabilityWitness:
     return false;
   }
+  llvm_unreachable("invalid descriptor");
 }
 
 llvm::Type *LinkEntity::getDefaultDeclarationType(IRGenModule &IGM) const {
@@ -1086,6 +1089,7 @@ DeclContext *LinkEntity::getDeclContextForEmission() const {
   case Kind::DifferentiabilityWitness:
     return nullptr;
   }
+  llvm_unreachable("invalid decl kind");
 }
 
 bool LinkEntity::isAlwaysSharedLinkage() const {

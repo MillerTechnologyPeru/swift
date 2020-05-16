@@ -658,9 +658,10 @@ public:
     ASTScopeAssert(!n.isDecl(DeclKind::Accessor),
                    "Should not see accessors here");
     // Can occur in illegal code
+    // non-empty brace stmt could define a new insertion point
     if (auto *const s = n.dyn_cast<Stmt *>()) {
       if (auto *const bs = dyn_cast<BraceStmt>(s))
-        ASTScopeAssert(bs->empty(), "Might mess up insertion point");
+        return !bs->empty();
     }
     return !n.isDecl(DeclKind::Var);
   }
@@ -711,7 +712,7 @@ public:
         }
       }
     }
-    for (const auto dcAndScope : bogusDCs) {
+    for (const auto &dcAndScope : bogusDCs) {
       llvm::errs() << "ASTScope tree confabulated: " << dcAndScope.getFirst()
                    << ":\n";
       dcAndScope.getFirst()->printContext(llvm::errs());
@@ -767,8 +768,7 @@ bool ASTScope::areInactiveIfConfigClausesSupported() {
 
 void ASTScope::expandFunctionBody(AbstractFunctionDecl *AFD) {
   auto *const SF = AFD->getParentSourceFile();
-  if (SF->isSuitableForASTScopes())
-    SF->getScope().expandFunctionBodyImpl(AFD);
+  SF->getScope().expandFunctionBodyImpl(AFD);
 }
 
 void ASTScope::expandFunctionBodyImpl(AbstractFunctionDecl *AFD) {
@@ -869,7 +869,6 @@ public:
   VISIT_AND_CREATE(DoCatchStmt, DoCatchStmtScope)
   VISIT_AND_CREATE(SwitchStmt, SwitchStmtScope)
   VISIT_AND_CREATE(ForEachStmt, ForEachStmtScope)
-  VISIT_AND_CREATE(CatchStmt, CatchStmtScope)
   VISIT_AND_CREATE(CaseStmt, CaseStmtScope)
   VISIT_AND_CREATE(AbstractFunctionDecl, AbstractFunctionDeclScope)
 
@@ -1121,7 +1120,7 @@ ASTScopeImpl::expandAndBeCurrentDetectingRecursion(ScopeCreator &scopeCreator) {
                            ExpandASTScopeRequest{this, &scopeCreator}, nullptr);
 }
 
-llvm::Expected<ASTScopeImpl *>
+ASTScopeImpl *
 ExpandASTScopeRequest::evaluate(Evaluator &evaluator, ASTScopeImpl *parent,
                                 ScopeCreator *scopeCreator) const {
   auto *insertionPoint = parent->expandAndBeCurrent(*scopeCreator);
@@ -1203,7 +1202,6 @@ NO_NEW_INSERTION_POINT(EnumElementScope)
 
 NO_NEW_INSERTION_POINT(CaptureListScope)
 NO_NEW_INSERTION_POINT(CaseStmtScope)
-NO_NEW_INSERTION_POINT(CatchStmtScope)
 NO_NEW_INSERTION_POINT(ClosureBodyScope)
 NO_NEW_INSERTION_POINT(DefaultArgumentInitializerScope)
 NO_NEW_INSERTION_POINT(DoCatchStmtScope)
@@ -1510,12 +1508,6 @@ void ForEachStmtScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
 void ForEachPatternScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
     ScopeCreator &scopeCreator) {
   scopeCreator.addToScopeTree(stmt->getWhere(), this);
-  scopeCreator.addToScopeTree(stmt->getBody(), this);
-}
-
-void CatchStmtScope::expandAScopeThatDoesNotCreateANewInsertionPoint(
-    ScopeCreator &scopeCreator) {
-  scopeCreator.addToScopeTree(stmt->getGuardExpr(), this);
   scopeCreator.addToScopeTree(stmt->getBody(), this);
 }
 

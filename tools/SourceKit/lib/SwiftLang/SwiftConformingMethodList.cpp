@@ -35,7 +35,7 @@ static bool swiftConformingMethodListImpl(
     bool EnableASTCaching, std::string &Error) {
   return Lang.performCompletionLikeOperation(
       UnresolvedInputFile, Offset, Args, FileSystem, EnableASTCaching, Error,
-      [&](CompilerInstance &CI) {
+      [&](CompilerInstance &CI, bool reusingASTContext) {
         // Create a factory for code completion callbacks that will feed the
         // Consumer.
         std::unique_ptr<CodeCompletionCallbacksFactory> callbacksFactory(
@@ -108,7 +108,7 @@ void SwiftLangSupport::getConformingMethodList(
 
         // Name.
         memberElem.DeclNameBegin = SS.size();
-        member->getFullName().print(OS);
+        member->getName().print(OS);
         memberElem.DeclNameLength = SS.size() - memberElem.DeclNameBegin;
 
         // Type name.

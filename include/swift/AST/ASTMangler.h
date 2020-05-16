@@ -153,6 +153,38 @@ public:
                                              Type SelfType,
                                              ModuleDecl *Module);
 
+  /// Mangle the derivative function (JVP/VJP) for the given:
+  /// - Mangled original function name.
+  /// - Derivative function kind.
+  /// - Derivative function configuration: parameter/result indices and
+  ///   derivative generic signature.
+  std::string
+  mangleAutoDiffDerivativeFunctionHelper(StringRef name,
+                                         AutoDiffDerivativeFunctionKind kind,
+                                         AutoDiffConfig config);
+
+  /// Mangle the linear map (differential/pullback) for the given:
+  /// - Mangled original function name.
+  /// - Linear map kind.
+  /// - Derivative function configuration: parameter/result indices and
+  ///   derivative generic signature.
+  std::string mangleAutoDiffLinearMapHelper(StringRef name,
+                                            AutoDiffLinearMapKind kind,
+                                            AutoDiffConfig config);
+
+  /// Mangle the AutoDiff generated declaration for the given:
+  /// - Generated declaration kind: linear map struct or branching trace enum.
+  /// - Mangled original function name.
+  /// - Basic block number.
+  /// - Linear map kind: differential or pullback.
+  /// - Derivative function configuration: parameter/result indices and
+  ///   derivative generic signature.
+  std::string
+  mangleAutoDiffGeneratedDeclaration(AutoDiffGeneratedDeclarationKind declKind,
+                                     StringRef origFnName, unsigned bbId,
+                                     AutoDiffLinearMapKind linearMapKind,
+                                     AutoDiffConfig config);
+
   /// Mangle a SIL differentiability witness key:
   /// - Mangled original function name.
   /// - Parameter indices.
@@ -203,6 +235,10 @@ public:
                                         bool IsStatic);
 
   std::string mangleLocalTypeDecl(const TypeDecl *type);
+
+  std::string mangleOpaqueTypeDecl(const OpaqueTypeDecl *decl);
+
+  std::string mangleOpaqueTypeDecl(const ValueDecl *decl);
 
   enum SpecialContext {
     ObjCContext,
@@ -351,6 +387,9 @@ protected:
 
   void appendProtocolConformance(const ProtocolConformance *conformance);
   void appendProtocolConformanceRef(const RootProtocolConformance *conformance);
+  void appendAnyProtocolConformance(CanGenericSignature genericSig,
+                                    CanType conformingType,
+                                    ProtocolConformanceRef conformance);
   void appendConcreteProtocolConformance(
                                         const ProtocolConformance *conformance);
   void appendDependentProtocolConformance(const ConformanceAccessPath &path);

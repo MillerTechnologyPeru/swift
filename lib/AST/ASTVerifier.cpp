@@ -419,10 +419,6 @@ public:
       // Always verify the node as a parsed node.
       verifyParsed(node);
 
-      // If we've bound names already, verify as a bound node.
-      if (!SF || SF->ASTStage >= SourceFile::NameBound)
-        verifyBound(node);
-
       // If we've checked types already, do some extra verification.
       if (!SF || SF->ASTStage >= SourceFile::TypeChecked) {
         verifyCheckedAlways(node);
@@ -522,11 +518,6 @@ public:
     void verifyParsedBase(T ASTNode) {
       verifyParsed(cast<typename ASTNodeBase<T>::BaseTy>(ASTNode));
     }
-
-    void verifyBound(Expr *E) {}
-    void verifyBound(Stmt *S) {}
-    void verifyBound(Pattern *P) {}
-    void verifyBound(Decl *D) {}
 
     /// @{
     /// These verification functions are always run on type checked ASTs
@@ -980,17 +971,6 @@ public:
       verifyCheckedBase(S);
     }
 
-    bool shouldVerifyChecked(CatchStmt *S) {
-      return shouldVerifyChecked(S->getErrorPattern());
-    }
-
-    void verifyChecked(CatchStmt *S) {
-      checkSameType(S->getErrorPattern()->getType(),
-                    checkExceptionTypeExists("catch statement"),
-                    "catch pattern");
-      verifyCheckedBase(S);
-    }
-
     bool shouldVerifyChecked(ReturnStmt *S) {
       return !S->hasResult() || shouldVerifyChecked(S->getResult());
     }
@@ -1216,9 +1196,7 @@ public:
       // it should be parented by the innermost function.
       auto enclosingScope = Scopes[Scopes.size() - 2];
       auto enclosingDC = enclosingScope.dyn_cast<DeclContext*>();
-      if (enclosingDC && !isa<AbstractClosureExpr>(enclosingDC)
-          && !(isa<SourceFile>(enclosingDC)
-               && cast<SourceFile>(enclosingDC)->Kind == SourceFileKind::REPL)){
+      if (enclosingDC && !isa<AbstractClosureExpr>(enclosingDC)){
         auto parentDC = E->getParent();
         if (!isa<Initializer>(parentDC)) {
           Out << "a closure in non-local context should be parented "
@@ -2834,8 +2812,8 @@ public:
 
       // All of the parameter names should match.
       if (!isa<DestructorDecl>(AFD)) { // Destructor has no non-self params.
-        auto paramNames = AFD->getFullName().getArgumentNames();
-        bool checkParamNames = (bool)AFD->getFullName();
+        auto paramNames = AFD->getName().getArgumentNames();
+        bool checkParamNames = (bool)AFD->getName();
         auto *firstParams = AFD->getParameters();
 
         if (checkParamNames &&

@@ -160,6 +160,9 @@ static bool isRLEInertInstruction(SILInstruction *Inst) {
   case SILInstructionKind::IsEscapingClosureInst:
   case SILInstructionKind::IsUniqueInst:
   case SILInstructionKind::FixLifetimeInst:
+  case SILInstructionKind::EndAccessInst:
+  case SILInstructionKind::SetDeallocatingInst:
+  case SILInstructionKind::DeallocRefInst:
     return true;
   default:
     return false;
@@ -1393,7 +1396,7 @@ void RLEContext::processBasicBlocksForGenKillSet() {
   for (SILBasicBlock *BB : PO->getReversePostOrder()) {
     LLVM_DEBUG(llvm::dbgs() << "PROCESS " << printCtx.getID(BB)
                             << " for Gen/Kill:\n";
-               BB->print(llvm::dbgs(), printCtx));
+               BB->print(printCtx));
 
     BlockState &S = getBlockState(BB);
 
@@ -1563,8 +1566,7 @@ bool RLEContext::run() {
     return false;
 
   // Do we run a multi-iteration data flow ?
-  bool Optimistic = Kind == ProcessKind::ProcessMultipleIterations ?
-                        true : false;
+  const bool Optimistic = (Kind == ProcessKind::ProcessMultipleIterations);
 
   // These are a list of basic blocks that we actually processed.
   // We do not process unreachable block, instead we set their liveouts to nil.
@@ -1583,8 +1585,7 @@ bool RLEContext::run() {
 
   LLVM_DEBUG(for (unsigned i = 0; i < LocationVault.size(); ++i) {
     llvm::dbgs() << "LSLocation #" << i;
-    getLocation(i).print(llvm::dbgs(), &Fn->getModule(),
-                         TypeExpansionContext(*Fn));
+    getLocation(i).print(llvm::dbgs());
   });
 
   if (Optimistic)

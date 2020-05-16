@@ -18,6 +18,7 @@
 #include "swift/SIL/SILModule.h"
 #include "swift/Subsystems.h"
 #include "llvm/IR/Module.h"
+#include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 
 using namespace swift;
 
@@ -30,6 +31,9 @@ namespace swift {
 #undef SWIFT_TYPEID_HEADER
 } // end namespace swift
 
+llvm::orc::ThreadSafeModule GeneratedModule::intoThreadSafeContext() && {
+  return {std::move(Module), std::move(Context)};
+}
 
 void swift::simple_display(llvm::raw_ostream &out,
                            const IRGenDescriptor &desc) {
@@ -40,12 +44,21 @@ void swift::simple_display(llvm::raw_ostream &out,
   } else {
     assert(SF);
     out << "IR Generation for file ";
-    out << '\"' << cast<LoadedFile>(SF)->getFilename() << '\"';
+    out << '\"' << SF->getFilename() << '\"';
   }
 }
 
 SourceLoc swift::extractNearestSourceLoc(const IRGenDescriptor &desc) {
   return SourceLoc();
+}
+
+evaluator::DependencySource IRGenSourceFileRequest::readDependencySource(
+    const evaluator::DependencyCollector &e) const {
+  auto &desc = std::get<0>(getStorage());
+  return {
+    desc.Ctx.dyn_cast<SourceFile *>(),
+    evaluator::DependencyScope::Cascading
+  };
 }
 
 // Define request evaluation functions for each of the IRGen requests.

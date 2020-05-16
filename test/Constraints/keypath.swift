@@ -40,11 +40,8 @@ let some = Some(keyPath: \Demo.here)
 func testFunc() {
   let _: (S) -> Int = \.i
   _ = ([S]()).map(\.i)
-
-  // FIXME: A terrible error, but the same as the pre-existing key path
-  // error in the similar situation: 'let _ = \S.init'.
-  _ = ([S]()).map(\.init)
-  // expected-error@-1 {{type of expression is ambiguous without more context}}
+  _ = \S.init // expected-error {{key path cannot refer to initializer 'init()'}}
+  _ = ([S]()).map(\.init) // expected-error {{key path cannot refer to initializer 'init()'}}
 
   let kp = \S.i
   let _: KeyPath<S, Int> = kp // works, because type defaults to KeyPath nominal
@@ -52,6 +49,13 @@ func testFunc() {
   let _: (S) -> Int = f // expected-error {{cannot convert value of type 'KeyPath<S, Int>' to specified type '(S) -> Int'}}
 }
 
+struct SR_12432 {
+  static func takesKeyPath(_: KeyPath<SR_12432.S, String>) -> String { "" }
+
+  struct S {
+    let text: String = takesKeyPath(\.text) // okay
+  }
+}
 
 // SR-11234
 public extension Array {

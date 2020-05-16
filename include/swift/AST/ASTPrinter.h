@@ -30,7 +30,7 @@ namespace swift {
   class TypeDecl;
   class EnumElementDecl;
   class Type;
-  struct TypeLoc;
+  class TypeLoc;
   class Pattern;
   class ExtensionDecl;
   class NominalTypeDecl;
@@ -206,6 +206,7 @@ public:
   void printKeyword(StringRef name, PrintOptions Opts, StringRef Suffix = "") {
     if (Opts.SkipUnderscoredKeywords && name.startswith("_"))
       return;
+    assert(!name.empty() && "Tried to print empty keyword");
     callPrintNamePre(PrintNameContext::Keyword);
     *this << name;
     printNamePost(PrintNameContext::Keyword);

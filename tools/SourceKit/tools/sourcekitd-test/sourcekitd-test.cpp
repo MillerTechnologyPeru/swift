@@ -15,7 +15,6 @@
 #include "SourceKit/Support/Concurrency.h"
 #include "TestOptions.h"
 #include "swift/Demangling/ManglingMacros.h"
-#include "clang/Rewrite/Core/RewriteBuffer.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/Optional.h"
@@ -26,6 +25,7 @@
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Program.h"
 #include "llvm/Support/Regex.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/Threading.h"
@@ -387,6 +387,16 @@ static int handleJsonRequestPath(StringRef QueryPath, const TestOptions &Opts) {
   return Error ? 1 : 0;
 }
 
+static int performShellExecution(ArrayRef<const char *> Args) {
+  auto Program = llvm::sys::findProgramByName(Args[0]);
+  if (std::error_code ec = Program.getError()) {
+    llvm::errs() << "command not found: " << Args[0] << "\n";
+    return ec.value();
+  }
+  SmallVector<StringRef, 8> execArgs(Args.begin(), Args.end());
+  return llvm::sys::ExecuteAndWait(*Program, execArgs);
+}
+
 static int handleTestInvocation(TestOptions Opts, TestOptions &InitOpts);
 
 static int handleTestInvocation(ArrayRef<const char *> Args,
@@ -418,6 +428,9 @@ static int handleTestInvocation(ArrayRef<const char *> Args,
       llvm::outs() << "warning: global configuration request failed\n";
     }
   }
+
+  if (Opts.ShellExecution)
+    return performShellExecution(Opts.CompilerArgs);
 
   assert(Opts.repeatRequest >= 1);
   for (unsigned i = 0; i < Opts.repeatRequest; ++i) {
@@ -534,7 +547,14 @@ static int handleTestInvocation(TestOptions Opts, TestOptions &InitOpts) {
   case SourceKitRequest::GlobalConfiguration:
     sourcekitd_request_dictionary_set_uid(Req, KeyRequest, RequestGlobalConfiguration);
     if (Opts.OptimizeForIde.hasValue())
-      sourcekitd_request_dictionary_set_int64(Req, KeyOptimizeForIDE, static_cast<int64_t>(Opts.OptimizeForIde.getValue()));
+      sourcekitd_request_dictionary_set_int64(
+          Req, KeyOptimizeForIDE,
+          static_cast<int64_t>(Opts.OptimizeForIde.getValue()));
+    if (Opts.CompletionCheckDependencyInterval.hasValue())
+      sourcekitd_request_dictionary_set_int64(
+          Req, KeyCompletionCheckDependencyInterval,
+          static_cast<int64_t>(
+              Opts.CompletionCheckDependencyInterval.getValue()));
     break;
 
   case SourceKitRequest::ProtocolVersion:
@@ -579,6 +599,8 @@ static int handleTestInvocation(TestOptions Opts, TestOptions &InitOpts) {
     sourcekitd_request_dictionary_set_uid(Req, KeyRequest, RequestCodeComplete);
     sourcekitd_request_dictionary_set_int64(Req, KeyOffset, ByteOffset);
     sourcekitd_request_dictionary_set_string(Req, KeyName, SemaName.c_str());
+    // Default to sort by name.
+    Opts.RequestOptions.insert(Opts.RequestOptions.begin(), "sort.byname=1");
     addCodeCompleteOptions(Req, Opts);
     break;
 
@@ -2065,53 +2087,85 @@ static void printStatistics(sourcekitd_variant_t Info, raw_ostream &OS) {
   });
 }
 
-static void initializeRewriteBuffer(StringRef Input,
-                                    clang::RewriteBuffer &RewriteBuf) {
-  RewriteBuf.Initialize(Input);
-  StringRef CheckStr = "CHECK";
-  size_t Pos = 0;
-  while (true) {
-    Pos = Input.find(CheckStr, Pos);
-    if (Pos == StringRef::npos)
-      break;
-    Pos = Input.substr(0, Pos).rfind("//");
-    assert(Pos != StringRef::npos);
-    size_t EndLine = Input.find('\n', Pos);
-    assert(EndLine != StringRef::npos);
-    ++EndLine;
-    RewriteBuf.RemoveText(Pos, EndLine-Pos);
-    Pos = EndLine;
+static std::string initializeSource(StringRef Input) {
+  std::string result;
+  {
+    llvm::raw_string_ostream OS(result);
+    StringRef CheckStr = "CHECK";
+    size_t Pos = 0;
+    while (true) {
+      auto checkPos = Input.find(CheckStr, Pos);
+      if (checkPos == StringRef::npos)
+        break;
+      checkPos = Input.substr(0, checkPos).rfind("//");
+      assert(checkPos != StringRef::npos);
+      size_t EndLine = Input.find('\n', checkPos);
+      assert(EndLine != StringRef::npos);
+      ++EndLine;
+      OS << Input.slice(Pos, checkPos);
+      Pos = EndLine;
+    }
+
+    OS << Input.slice(Pos, StringRef::npos);
   }
+  return result;
 }
 
-static std::vector<std::pair<unsigned, unsigned>>
-getPlaceholderRanges(StringRef Source) {
+static Optional<std::pair<unsigned, unsigned>>
+firstPlaceholderRange(StringRef Source, unsigned from) {
   const char *StartPtr = Source.data();
-  std::vector<std::pair<unsigned, unsigned>> Ranges;
+  Source = Source.drop_front(from);
+
   while (true) {
     size_t Pos = Source.find("<#");
     if (Pos == StringRef::npos)
       break;
     unsigned OffsetStart = Source.data() + Pos - StartPtr;
     Source = Source.substr(Pos+2);
+    if (Source.startswith("__skip__") || Source.startswith("T##__skip__"))
+      continue;
     Pos = Source.find("#>");
     if (Pos == StringRef::npos)
       break;
     unsigned OffsetEnd = Source.data() + Pos + 2 - StartPtr;
     Source = Source.substr(Pos+2);
-    Ranges.emplace_back(OffsetStart, OffsetEnd-OffsetStart);
+    return std::make_pair(OffsetStart, OffsetEnd-OffsetStart);
   }
-  return Ranges;
+  return llvm::None;
 }
 
 static void expandPlaceholders(llvm::MemoryBuffer *SourceBuf,
                                llvm::raw_ostream &OS) {
-  clang::RewriteBuffer RewriteBuf;
-  initializeRewriteBuffer(SourceBuf->getBuffer(), RewriteBuf);
-  auto Ranges = getPlaceholderRanges(SourceBuf->getBuffer());
-  for (auto Range : Ranges) {
-    unsigned Offset = Range.first;
-    unsigned Length = Range.second;
+  auto syncEdit = [=](unsigned offset, unsigned length, const char *text) {
+    auto SourceBufID = SourceBuf->getBufferIdentifier();
+    auto req = sourcekitd_request_dictionary_create(nullptr, nullptr, 0);
+    sourcekitd_request_dictionary_set_uid(req, KeyRequest,
+                                          RequestEditorReplaceText);
+    sourcekitd_request_dictionary_set_stringbuf(req, KeyName,
+                                                SourceBufID.data(),
+                                                SourceBufID.size());
+    sourcekitd_request_dictionary_set_int64(req, KeyOffset, offset);
+    sourcekitd_request_dictionary_set_int64(req, KeyLength, length);
+    sourcekitd_request_dictionary_set_string(req, KeySourceText, text);
+
+    sourcekitd_response_t resp = sourcekitd_send_request_sync(req);
+    if (sourcekitd_response_is_error(resp)) {
+      sourcekitd_response_description_dump(resp);
+      exit(1);
+    }
+    sourcekitd_request_release(req);
+    sourcekitd_response_dispose(resp);
+  };
+
+  std::string source = initializeSource(SourceBuf->getBuffer());
+  // Sync contents with modified source.
+  syncEdit(0, SourceBuf->getBuffer().size(), source.c_str());
+
+  unsigned cursor = 0;
+
+  while (auto Range = firstPlaceholderRange(source, cursor)) {
+    unsigned Offset = Range->first;
+    unsigned Length = Range->second;
     sourcekitd_object_t Exp = sourcekitd_request_dictionary_create(nullptr,
                                                                    nullptr, 0);
     sourcekitd_request_dictionary_set_uid(Exp, KeyRequest,
@@ -2133,16 +2187,25 @@ static void expandPlaceholders(llvm::MemoryBuffer *SourceBuf,
     sourcekitd_variant_t Info = sourcekitd_response_get_value(Resp);
     const char *Text = sourcekitd_variant_dictionary_get_string(Info, KeySourceText);
     if (!Text) {
+      cursor = Offset + Length;
       sourcekitd_response_dispose(Resp);
       continue;
     }
     unsigned EditOffset = sourcekitd_variant_dictionary_get_int64(Info, KeyOffset);
     unsigned EditLength = sourcekitd_variant_dictionary_get_int64(Info, KeyLength);
-    RewriteBuf.ReplaceText(EditOffset, EditLength, Text);
+
+    // Apply edit locally.
+    source.replace(EditOffset, EditLength, Text);
+
+    // Apply edit on server.
+    syncEdit(EditOffset, EditLength, Text);
+
+    // Adjust cursor to after the edit (we do not expand recursively).
+    cursor = EditOffset + strlen(Text);
     sourcekitd_response_dispose(Resp);
   }
 
-  RewriteBuf.write(OS);
+  OS << source;
 }
 
 static std::pair<unsigned, unsigned>

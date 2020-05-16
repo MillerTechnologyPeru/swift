@@ -21,7 +21,6 @@
 #include "swift/Basic/OptionSet.h"
 #include "swift/Basic/PrimarySpecificPaths.h"
 #include "swift/Basic/Version.h"
-#include "llvm/IR/LLVMContext.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/StringRef.h"
@@ -48,6 +47,7 @@ namespace swift {
   class DiagnosticEngine;
   class Evaluator;
   class FileUnit;
+  class GeneratedModule;
   class GenericEnvironment;
   class GenericParamList;
   class IRGenOptions;
@@ -67,7 +67,7 @@ namespace swift {
   class Token;
   class TopLevelContext;
   class TypeCheckerOptions;
-  struct TypeLoc;
+  class TypeLoc;
   class UnifiedStatsReporter;
 
   namespace Lowering {
@@ -102,9 +102,6 @@ namespace swift {
 
   /// @}
 
-  /// Parse a source file's SIL declarations into a given SIL module.
-  void parseSourceFileSIL(SourceFile &SF, SILParserState *sil);
-
   /// Finish the code completion.
   void performCodeCompletionSecondPass(SourceFile &SF,
                                        CodeCompletionCallbacksFactory &Factory);
@@ -118,33 +115,32 @@ namespace swift {
                               bool TokenizeInterpolatedString = true,
                               ArrayRef<Token> SplitTokens = ArrayRef<Token>());
 
-  /// Once parsing is complete, this walks the AST to resolve imports, record
-  /// operators, and do other top-level validation.
-  void performNameBinding(SourceFile &SF);
+  /// This walks the AST to resolve imports.
+  void performImportResolution(SourceFile &SF);
 
   /// Once type-checking is complete, this instruments code with calls to an
   /// intrinsic that record the expected values of local variables so they can
   /// be compared against the results from the debugger.
   void performDebuggerTestingTransform(SourceFile &SF);
 
-  /// Once parsing and name-binding are complete, this optionally transforms the
-  /// ASTs to add calls to external logging functions.
+  /// Once type checking is complete, this optionally transforms the ASTs to add
+  /// calls to external logging functions.
   ///
   /// \param HighPerformance True if the playground transform should omit
   /// instrumentation that has a high runtime performance impact.
   void performPlaygroundTransform(SourceFile &SF, bool HighPerformance);
   
-  /// Once parsing and name-binding are complete this optionally walks the ASTs
-  /// to add calls to externally provided functions that simulate
-  /// "program counter"-like debugging events. See the comment at the top of
-  /// lib/Sema/PCMacro.cpp for a description of the calls inserted.
+  /// Once type checking is complete this optionally walks the ASTs to add calls
+  /// to externally provided functions that simulate "program counter"-like
+  /// debugging events. See the comment at the top of lib/Sema/PCMacro.cpp for a
+  /// description of the calls inserted.
   void performPCMacro(SourceFile &SF);
 
   /// Bind all 'extension' visible from \p SF to the extended nominal.
-  void bindExtensions(SourceFile &SF);
+  void bindExtensions(ModuleDecl &mod);
 
-  /// Once parsing and name-binding are complete, this walks the AST to resolve
-  /// types and diagnose problems therein.
+  /// Once import resolution is complete, this walks the AST to resolve types
+  /// and diagnose problems therein.
   void performTypeChecking(SourceFile &SF);
 
   /// Now that we have type-checked an entire module, perform any type
@@ -231,11 +227,10 @@ namespace swift {
   /// Turn the given Swift module into either LLVM IR or native code
   /// and return the generated LLVM IR module.
   /// If you set an outModuleHash, then you need to call performLLVM.
-  std::unique_ptr<llvm::Module>
+  GeneratedModule
   performIRGeneration(const IRGenOptions &Opts, ModuleDecl *M,
                       std::unique_ptr<SILModule> SILMod,
                       StringRef ModuleName, const PrimarySpecificPaths &PSPs,
-                      llvm::LLVMContext &LLVMContext,
                       ArrayRef<std::string> parallelOutputFilenames,
                       llvm::GlobalVariable **outModuleHash = nullptr,
                       llvm::StringSet<> *LinkerDirectives = nullptr);
@@ -243,12 +238,11 @@ namespace swift {
   /// Turn the given Swift module into either LLVM IR or native code
   /// and return the generated LLVM IR module.
   /// If you set an outModuleHash, then you need to call performLLVM.
-  std::unique_ptr<llvm::Module>
+  GeneratedModule
   performIRGeneration(const IRGenOptions &Opts, SourceFile &SF,
                       std::unique_ptr<SILModule> SILMod,
                       StringRef ModuleName, const PrimarySpecificPaths &PSPs,
                       StringRef PrivateDiscriminator,
-                      llvm::LLVMContext &LLVMContext,
                       llvm::GlobalVariable **outModuleHash = nullptr,
                       llvm::StringSet<> *LinkerDirectives = nullptr);
 
@@ -290,9 +284,7 @@ namespace swift {
                    UnifiedStatsReporter *Stats);
 
   /// Dump YAML describing all fixed-size types imported from the given module.
-  bool performDumpTypeInfo(const IRGenOptions &Opts,
-                           SILModule &SILMod,
-                           llvm::LLVMContext &LLVMContext);
+  bool performDumpTypeInfo(const IRGenOptions &Opts, SILModule &SILMod);
 
   /// Creates a TargetMachine from the IRGen opts and AST Context.
   std::unique_ptr<llvm::TargetMachine>

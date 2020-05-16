@@ -54,7 +54,7 @@ namespace swift {
   class ScopeInfo;
   class SourceManager;
   class TupleType;
-  struct TypeLoc;
+  class TypeLoc;
   
   struct EnumElementInfo;
   
@@ -494,13 +494,7 @@ public:
     ~BacktrackingScope();
     bool willBacktrack() const { return Backtrack; }
 
-    void cancelBacktrack() {
-      Backtrack = false;
-      SynContext->setTransparent();
-      SynContext.reset();
-      DT.commit();
-      TempReceiver.shouldTransfer = true;
-    }
+    void cancelBacktrack();
   };
 
   /// RAII object that, when it is destructed, restores the parser and lexer to
@@ -888,7 +882,8 @@ public:
   void parseTopLevel(SmallVectorImpl<Decl *> &decls);
 
   /// Parse the top-level SIL decls into the SIL module.
-  void parseTopLevelSIL();
+  /// \returns \c true if there was a parsing error.
+  bool parseTopLevelSIL();
 
   /// Flags that control the parsing of declarations.
   enum ParseDeclFlags {
@@ -1010,8 +1005,6 @@ public:
   /// Parse the arguments inside the @differentiable attribute.
   bool parseDifferentiableAttributeArguments(
       bool &linear, SmallVectorImpl<ParsedAutoDiffParameter> &params,
-      Optional<DeclNameRefWithLoc> &jvpSpec,
-      Optional<DeclNameRefWithLoc> &vjpSpec,
       TrailingWhereClause *&whereClause);
 
   /// Parse a differentiability parameters clause, i.e. the 'wrt:' clause in
@@ -1366,8 +1359,7 @@ public:
   ParserResult<Pattern> parsePatternTuple();
   
   ParserResult<Pattern>
-  parseOptionalPatternTypeAnnotation(ParserResult<Pattern> P,
-                                     bool isOptional);
+  parseOptionalPatternTypeAnnotation(ParserResult<Pattern> P);
   ParserResult<Pattern> parseMatchingPattern(bool isExprBasic);
   ParserResult<Pattern> parseMatchingPatternAsLetOrVar(bool isLet,
                                                        SourceLoc VarLoc,
@@ -1553,7 +1545,7 @@ public:
           ParameterList *&params,
           SourceLoc &throwsLoc,
           SourceLoc &arrowLoc,
-          TypeRepr *&explicitResultType,
+          TypeExpr *&explicitResultType,
           SourceLoc &inLoc);
 
   Expr *parseExprAnonClosureArg();
@@ -1569,10 +1561,12 @@ public:
                              SmallVectorImpl<Identifier> &exprLabels,
                              SmallVectorImpl<SourceLoc> &exprLabelLocs,
                              SourceLoc &rightLoc,
-                             Expr *&trailingClosure,
+                             SmallVectorImpl<TrailingClosure> &trailingClosures,
                              syntax::SyntaxKind Kind);
 
-  ParserResult<Expr> parseTrailingClosure(SourceRange calleeRange);
+  ParserStatus
+  parseTrailingClosures(bool isExprBasic, SourceRange calleeRange,
+                        SmallVectorImpl<TrailingClosure> &closures);
 
   /// Parse an object literal.
   ///
@@ -1619,7 +1613,7 @@ public:
   ParserResult<Stmt> parseStmtRepeat(LabeledStmtInfo LabelInfo);
   ParserResult<Stmt> parseStmtDo(LabeledStmtInfo LabelInfo,
                                  bool shouldSkipDoTokenConsume = false);
-  ParserResult<CatchStmt> parseStmtCatch();
+  ParserResult<CaseStmt> parseStmtCatch();
   ParserResult<Stmt> parseStmtForEach(LabeledStmtInfo LabelInfo);
   ParserResult<Stmt> parseStmtSwitch(LabeledStmtInfo LabelInfo);
   ParserStatus parseStmtCases(SmallVectorImpl<ASTNode> &cases, bool IsActive);

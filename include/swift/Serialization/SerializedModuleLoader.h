@@ -135,6 +135,9 @@ protected:
     return false;
   }
 
+  /// Scan the given serialized module file to determine dependencies.
+  llvm::ErrorOr<ModuleDependencies> scanModuleFile(Twine modulePath);
+
 public:
   virtual ~SerializedModuleLoaderBase();
   SerializedModuleLoaderBase(const SerializedModuleLoaderBase &) = delete;
@@ -184,7 +187,15 @@ public:
                  unsigned previousGeneration,
                  llvm::TinyPtrVector<AbstractFunctionDecl *> &methods) override;
 
+  virtual void loadDerivativeFunctionConfigurations(
+      AbstractFunctionDecl *originalAFD, unsigned previousGeneration,
+      llvm::SetVector<AutoDiffConfig> &results) override;
+
   virtual void verifyAllModules() override;
+
+  virtual Optional<ModuleDependencies> getModuleDependencies(
+      StringRef moduleName, ModuleDependenciesCache &cache,
+      InterfaceSubContextDelegate &delegate) override;
 };
 
 /// Imports serialized Swift modules into an ASTContext.
@@ -296,16 +307,15 @@ class SerializedASTFile final : public LoadedFile {
 
   ModuleFile &File;
 
-  bool IsSIB;
-
-  SerializedASTFile(ModuleDecl &M, ModuleFile &file, bool isSIB = false)
-    : LoadedFile(FileUnitKind::SerializedAST, M), File(file), IsSIB(isSIB) {}
+  SerializedASTFile(ModuleDecl &M, ModuleFile &file)
+    : LoadedFile(FileUnitKind::SerializedAST, M), File(file) {}
 
   void
   collectLinkLibrariesFromImports(ModuleDecl::LinkLibraryCallback callback) const;
 
 public:
-  bool isSIB() const { return IsSIB; }
+  /// Whether this represents a '.sib' file.
+  bool isSIB() const;
 
   /// Returns the language version that was used to compile the contents of this
   /// file.
@@ -328,12 +338,16 @@ public:
   lookupNestedType(Identifier name,
                    const NominalTypeDecl *parent) const override;
 
-  virtual OperatorDecl *lookupOperator(Identifier name,
-                                       DeclKind fixity) const override;
+protected:
+  virtual void
+  lookupOperatorDirect(Identifier name, OperatorFixity fixity,
+                       TinyPtrVector<OperatorDecl *> &results) const override;
 
-  virtual PrecedenceGroupDecl *
-  lookupPrecedenceGroup(Identifier name) const override;
+  virtual void lookupPrecedenceGroupDirect(
+      Identifier name,
+      TinyPtrVector<PrecedenceGroupDecl *> &results) const override;
 
+public:
   virtual void lookupVisibleDecls(ModuleDecl::AccessPathTy accessPath,
                                   VisibleDeclConsumer &consumer,
                                   NLKind lookupKind) const override;
@@ -377,6 +391,9 @@ public:
       llvm::function_ref<bool(DeclAttributes)> matchAttributes) const override;
 
   virtual void
+  getOperatorDecls(SmallVectorImpl<OperatorDecl *> &results) const override;
+
+  virtual void
   getPrecedenceGroups(SmallVectorImpl<PrecedenceGroupDecl*> &Results) const override;
 
   virtual void
@@ -399,11 +416,13 @@ public:
 
   virtual StringRef getModuleDefiningPath() const override;
 
-  ClassDecl *getMainClass() const override;
+  Decl *getMainDecl() const override;
 
   bool hasEntryPoint() const override;
 
   virtual const clang::Module *getUnderlyingClangModule() const override;
+
+  virtual ModuleDecl *getUnderlyingModuleIfOverlay() const override;
 
   virtual bool getAllGenericSignatures(
                    SmallVectorImpl<GenericSignature> &genericSignatures)

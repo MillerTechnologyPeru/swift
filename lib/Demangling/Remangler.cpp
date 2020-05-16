@@ -1221,6 +1221,26 @@ void Remangler::mangleFunctionType(Node *node) {
   Buffer << 'c';
 }
 
+void Remangler::mangleDifferentiableFunctionType(Node *node) {
+  mangleFunctionSignature(node);
+  Buffer << "XF";
+}
+
+void Remangler::mangleEscapingDifferentiableFunctionType(Node *node) {
+  mangleFunctionSignature(node);
+  Buffer << "XG";
+}
+
+void Remangler::mangleLinearFunctionType(Node *node) {
+  mangleFunctionSignature(node);
+  Buffer << "XH";
+}
+
+void Remangler::mangleEscapingLinearFunctionType(Node *node) {
+  mangleFunctionSignature(node);
+  Buffer << "XI";
+}
+
 void Remangler::mangleGenericProtocolWitnessTable(Node *node) {
   mangleSingleChildNode(node);
   Buffer << "WG";
@@ -1378,6 +1398,14 @@ void Remangler::mangleIVarDestroyer(Node *node) {
   Buffer << "fE";
 }
 
+void Remangler::mangleImplDifferentiable(Node *node) {
+  Buffer << 'd';
+}
+
+void Remangler::mangleImplLinear(Node *node) {
+  Buffer << 'l';
+}
+
 void Remangler::mangleImplEscaping(Node *node) {
   Buffer << 'e';
 }
@@ -1390,6 +1418,18 @@ void Remangler::mangleImplConvention(Node *node) {
                   .Default(0);
   assert(ConvCh && "invalid impl callee convention");
   Buffer << ConvCh;
+}
+
+void Remangler::mangleImplDifferentiability(Node *node) {
+  assert(node->hasText());
+  // Empty string represents default differentiability.
+  if (node->getText().empty())
+    return;
+  char diffChar = llvm::StringSwitch<char>(node->getText())
+                      .Case("@noDerivative", 'w')
+                      .Default(0);
+  assert(diffChar && "Invalid impl differentiability");
+  Buffer << diffChar;
 }
 
 void Remangler::mangleImplFunctionAttribute(Node *node) {
@@ -1415,7 +1455,9 @@ void Remangler::mangleImplFunctionType(Node *node) {
     case Node::Kind::ImplResult:
     case Node::Kind::ImplYield:
     case Node::Kind::ImplErrorResult:
-      mangleChildNode(Child, 1);
+      // Mangle type. Type should be the last child.
+      assert(Child->getNumChildren() == 2 || Child->getNumChildren() == 3);
+      mangle(Child->getLastChild());
       break;
     case Node::Kind::DependentPseudogenericSignature:
       PseudoGeneric = "P";
@@ -1459,6 +1501,12 @@ void Remangler::mangleImplFunctionType(Node *node) {
   Buffer << PseudoGeneric;
   for (NodePointer Child : *node) {
     switch (Child->getKind()) {
+      case Node::Kind::ImplDifferentiable:
+        Buffer << 'd';
+        break;
+      case Node::Kind::ImplLinear:
+        Buffer << 'l';
+        break;
       case Node::Kind::ImplEscaping:
         Buffer << 'e';
         break;
@@ -1492,6 +1540,7 @@ void Remangler::mangleImplFunctionType(Node *node) {
         Buffer << 'Y';
         LLVM_FALLTHROUGH;
       case Node::Kind::ImplParameter: {
+        // Mangle parameter convention.
         char ConvCh =
             llvm::StringSwitch<char>(Child->getFirstChild()->getText())
                 .Case("@in", 'i')
@@ -1506,6 +1555,9 @@ void Remangler::mangleImplFunctionType(Node *node) {
                 .Default(0);
         assert(ConvCh && "invalid impl parameter convention");
         Buffer << ConvCh;
+        // Mangle parameter differentiability, if it exists.
+        if (Child->getNumChildren() == 3)
+          mangleImplDifferentiability(Child->getChild(1));
         break;
       }
       case Node::Kind::ImplErrorResult:

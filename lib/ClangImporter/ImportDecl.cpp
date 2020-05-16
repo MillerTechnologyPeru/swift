@@ -47,8 +47,11 @@
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
+#include "clang/AST/DeclObjCCommon.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/Basic/CharInfo.h"
 #include "swift/Basic/Statistic.h"
+#include "clang/Basic/Specifiers.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/Lookup.h"
@@ -400,6 +403,7 @@ getSwiftStdlibType(const clang::TypedefNameDecl *D,
       case clang::TargetInfo::VoidPtrBuiltinVaList:
       case clang::TargetInfo::PowerABIBuiltinVaList:
       case clang::TargetInfo::AAPCSABIBuiltinVaList:
+      case clang::TargetInfo::HexagonBuiltinVaList:
         assert(ClangCtx.getTypeSize(ClangCtx.VoidPtrTy) == ClangTypeSize &&
                "expected va_list type to be sizeof(void *)");
         break;
@@ -1243,15 +1247,16 @@ makeBitFieldAccessors(ClangImporter::Implementation &Impl,
                                                          fieldType,
                                                          clang::VK_RValue,
                                                          clang::SourceLocation());
-    
-    auto cSetterExpr = new (Ctx) clang::BinaryOperator(cSetterMemberExpr,
-                                                       cSetterValueExpr,
-                                                       clang::BO_Assign,
-                                                       fieldType,
-                                                       clang::VK_RValue,
-                                                       clang::OK_Ordinary,
-                                                       clang::SourceLocation(),
-                                                       clang::FPOptions());
+
+    auto cSetterExpr = clang::BinaryOperator::Create(Ctx,
+                                                     cSetterMemberExpr,
+                                                     cSetterValueExpr,
+                                                     clang::BO_Assign,
+                                                     fieldType,
+                                                     clang::VK_RValue,
+                                                     clang::OK_Ordinary,
+                                                     clang::SourceLocation(),
+                                                     clang::FPOptions());
     
     cSetterDecl->setBody(cSetterExpr);
   }
@@ -2104,7 +2109,7 @@ classImplementsProtocol(const clang::ObjCInterfaceDecl *constInterface,
 
 static void
 applyPropertyOwnership(VarDecl *prop,
-                       clang::ObjCPropertyDecl::PropertyAttributeKind attrs) {
+                       clang::ObjCPropertyAttribute::Kind attrs) {
   Type ty = prop->getInterfaceType();
   if (auto innerTy = ty->getOptionalObjectType())
     ty = innerTy;
@@ -2112,19 +2117,19 @@ applyPropertyOwnership(VarDecl *prop,
     return;
 
   ASTContext &ctx = prop->getASTContext();
-  if (attrs & clang::ObjCPropertyDecl::OBJC_PR_copy) {
+  if (attrs & clang::ObjCPropertyAttribute::kind_copy) {
     prop->getAttrs().add(new (ctx) NSCopyingAttr(false));
     return;
   }
-  if (attrs & clang::ObjCPropertyDecl::OBJC_PR_weak) {
+  if (attrs & clang::ObjCPropertyAttribute::kind_weak) {
     prop->getAttrs().add(new (ctx)
                              ReferenceOwnershipAttr(ReferenceOwnership::Weak));
     prop->setInterfaceType(WeakStorageType::get(
         prop->getInterfaceType(), ctx));
     return;
   }
-  if ((attrs & clang::ObjCPropertyDecl::OBJC_PR_assign) ||
-      (attrs & clang::ObjCPropertyDecl::OBJC_PR_unsafe_unretained)) {
+  if ((attrs & clang::ObjCPropertyAttribute::kind_assign) ||
+      (attrs & clang::ObjCPropertyAttribute::kind_unsafe_unretained)) {
     prop->getAttrs().add(
         new (ctx) ReferenceOwnershipAttr(ReferenceOwnership::Unmanaged));
     prop->setInterfaceType(UnmanagedStorageType::get(
@@ -2212,7 +2217,7 @@ namespace {
           if (fd->isInstanceMember() != decl->isInstanceProperty())
             continue;
 
-          assert(fd->getFullName().getArgumentNames().empty());
+          assert(fd->getName().getArgumentNames().empty());
           foundMethod = true;
         } else {
           auto *var = cast<VarDecl>(result);
@@ -3225,7 +3230,7 @@ namespace {
           // context.
           if (errorWrapper) {
             auto enumeratorValue = cast<ValueDecl>(enumeratorDecl);
-            auto name = enumeratorValue->getBaseName().getIdentifier();
+            auto name = enumeratorValue->getBaseIdentifier();
             auto alias = importEnumCaseAlias(name,
                                              constant,
                                              enumeratorValue,
@@ -3334,6 +3339,12 @@ namespace {
       // it is nested in a struct.
 
       for (auto m : decl->decls()) {
+        if (isa<clang::AccessSpecDecl>(m)) {
+          // The presence of AccessSpecDecls themselves does not influence
+          // whether we can generate a member-wise initializer.
+          continue;
+        }
+
         auto nd = dyn_cast<clang::NamedDecl>(m);
         if (!nd) {
           // We couldn't import the member, so we can't reference it in Swift.
@@ -3364,8 +3375,8 @@ namespace {
 
         auto member = Impl.importDecl(nd, getActiveSwiftVersion());
         if (!member) {
-          if (!isa<clang::TypeDecl>(nd)) {
-            // We don't know what this field is.
+          if (!isa<clang::TypeDecl>(nd) && !isa<clang::FunctionDecl>(nd)) {
+            // We don't know what this member is.
             // Assume it may be important in C.
             hasUnreferenceableStorage = true;
             hasMemberwiseInitializer = false;
@@ -3483,6 +3494,25 @@ namespace {
       }
 
       result->setHasUnreferenceableStorage(hasUnreferenceableStorage);
+
+      if (auto cxxRecordDecl = dyn_cast<clang::CXXRecordDecl>(decl)) {
+        result->setIsCxxNotTriviallyCopyable(
+            !cxxRecordDecl->isTriviallyCopyable());
+
+        for (auto ctor : cxxRecordDecl->ctors()) {
+          if (ctor->isCopyConstructor() &&
+              (ctor->isDeleted() || ctor->getAccess() != clang::AS_public)) {
+            result->setIsCxxNotTriviallyCopyable(true);
+            break;
+          }
+        }
+
+        if (auto dtor = cxxRecordDecl->getDestructor()) {
+          if (dtor->isDeleted() || dtor->getAccess() != clang::AS_public) {
+            result->setIsCxxNotTriviallyCopyable(true);
+          }
+        }
+      }
 
       return result;
     }
@@ -3941,6 +3971,12 @@ namespace {
                               /*IsCaptureList*/false,
                               Impl.importSourceLoc(decl->getLocation()),
                               name, dc);
+      if (decl->getType().isConstQualified()) {
+        // Note that in C++ there are ways to change the values of const
+        // members, so we don't use WriteImplKind::Immutable storage.
+        assert(result->supportsMutation());
+        result->overwriteSetterAccess(AccessLevel::Private);
+      }
       result->setIsObjC(false);
       result->setIsDynamic(false);
       result->setInterfaceType(type);
@@ -3971,10 +4007,6 @@ namespace {
     }
 
     Decl *VisitVarDecl(const clang::VarDecl *decl) {
-      // FIXME: Swift does not have static variables in structs/classes yet.
-      if (decl->getDeclContext()->isRecord())
-        return nullptr;
-
       // Variables are imported as... variables.
       Optional<ImportedName> correctSwiftName;
       auto importedName = importFullName(decl, correctSwiftName);
@@ -4177,7 +4209,7 @@ namespace {
       for (auto decl : classDecl->lookupDirect(selector, isInstance)) {
         if ((decl->getClangDecl()
              || !decl->getDeclContext()->getParentSourceFile())
-            && importedName.getDeclName() == decl->getFullName()
+            && importedName.getDeclName() == decl->getName()
             && filter(decl)) {
           result = true;
           break;
@@ -4482,7 +4514,7 @@ namespace {
       // We only care about recording methods with no arguments here, because
       // they can shadow imported properties.
       if (!isa<AccessorDecl>(result) &&
-          result->getFullName().getArgumentNames().empty()) {
+          result->getName().getArgumentNames().empty()) {
         recordMemberInContext(dc, result);
       }
 
@@ -6536,7 +6568,7 @@ void SwiftDeclConverter::recordObjCOverride(AbstractFunctionDecl *decl) {
     return;
   // Dig out the Objective-C superclass.
   SmallVector<ValueDecl *, 4> results;
-  superDecl->lookupQualified(superDecl, DeclNameRef(decl->getFullName()),
+  superDecl->lookupQualified(superDecl, DeclNameRef(decl->getName()),
                              NL_QualifiedDefault | NL_KnownNoDependency,
                              results);
   for (auto member : results) {
@@ -6609,7 +6641,7 @@ void SwiftDeclConverter::recordObjCOverride(SubscriptDecl *subscript) {
   // operation.
   SmallVector<ValueDecl *, 2> lookup;
   subscript->getModuleContext()->lookupQualified(
-      superDecl, DeclNameRef(subscript->getFullName()),
+      superDecl, DeclNameRef(subscript->getName()),
       NL_QualifiedDefault | NL_KnownNoDependency, lookup);
 
   for (auto result : lookup) {
@@ -7722,7 +7754,7 @@ void ClangImporter::Implementation::importAttributes(
   // Hack: mark any method named "print" with less than two parameters as
   // warn_unqualified_access.
   if (auto MD = dyn_cast<FuncDecl>(MappedDecl)) {
-    if (isPrintLikeMethod(MD->getFullName(), MD->getDeclContext())) {
+    if (isPrintLikeMethod(MD->getName(), MD->getDeclContext())) {
       // Use a non-implicit attribute so it shows up in the generated
       // interface.
       MD->getAttrs().add(new (C) WarnUnqualifiedAccessAttr(/*implicit*/false));
@@ -7919,7 +7951,7 @@ static void finishTypeWitnesses(
                           NL_OnlyTypes |
                           NL_ProtocolMembers);
 
-    dc->lookupQualified(nominal, DeclNameRef(assocType->getFullName()), options,
+    dc->lookupQualified(nominal, DeclNameRef(assocType->getName()), options,
                         lookupResults);
     for (auto member : lookupResults) {
       auto typeDecl = cast<TypeDecl>(member);

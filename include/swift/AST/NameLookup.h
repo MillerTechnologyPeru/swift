@@ -263,9 +263,9 @@ enum class DeclVisibilityKind {
   /// \endcode
   MemberOfCurrentNominal,
 
-  /// Declaration that is a requirement of a protocol implemented by the
-  /// immediately enclosing nominal decl, in case the nominal decl does not
-  /// supply a witness for this requirement.
+  /// Declaration is a requirement – in case the nominal decl does not supply
+  /// a corresponding witness – or an extension member of a protocol
+  /// conformed to by the immediately enclosing nominal decl.
   ///
   /// For example, 'foo' is visible at (1) because of this.
   /// \code
@@ -278,7 +278,12 @@ enum class DeclVisibilityKind {
   ///   }
   /// }
   /// \endcode
-  MemberOfProtocolImplementedByCurrentNominal,
+  MemberOfProtocolConformedToByCurrentNominal,
+
+  /// Declaration is a derived requirement of a protocol conformed to by the
+  /// immediately enclosing nominal decl (a witness for a synthesized
+  /// conformance).
+  MemberOfProtocolDerivedByCurrentNominal,
 
   /// Declaration is a member of the superclass of the immediately enclosing
   /// nominal decl.
@@ -414,7 +419,7 @@ public:
     // to avoid circular validation.
     if (isTypeLookup && !isa<TypeDecl>(VD))
       return;
-    if (VD->getFullName().matchesRef(name.getFullName()))
+    if (VD->getName().matchesRef(name.getFullName()))
       results.push_back(LookupResultEntry(VD));
   }
 };
@@ -467,6 +472,8 @@ void lookupVisibleMemberDecls(VisibleDeclConsumer &Consumer,
                               Type BaseTy,
                               const DeclContext *CurrDC,
                               bool includeInstanceMembers,
+                              bool includeDerivedRequirements,
+                              bool includeProtocolExtensionMembers,
                               GenericSignatureBuilder *GSB = nullptr);
 
 namespace namelookup {
@@ -587,8 +594,6 @@ private:
   void visitCaseStmt(CaseStmt *S);
 
   void visitDoCatchStmt(DoCatchStmt *S);
-  void visitCatchClauses(ArrayRef<CatchStmt*> clauses);
-  void visitCatchStmt(CatchStmt *S);
   
 };
   

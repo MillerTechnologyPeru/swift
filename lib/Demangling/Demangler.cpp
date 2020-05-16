@@ -677,12 +677,14 @@ NodePointer Demangler::demangleTypeMangling() {
   return TypeMangling;
 }
 
-NodePointer Demangler::demangleSymbolicReference(unsigned char rawKind,
-                                                 const void *at) {
+NodePointer Demangler::demangleSymbolicReference(unsigned char rawKind) {
   // The symbolic reference is a 4-byte machine integer encoded in the following
   // four bytes.
+  if (Pos + 4 > Text.size())
+    return nullptr;
+  const void *at = Text.data() + Pos;
   int32_t value;
-  memcpy(&value, Text.data() + Pos, 4);
+  memcpy(&value, at, 4);
   Pos += 4;
   
   // Map the encoded kind to a specific kind and directness.
@@ -716,8 +718,10 @@ NodePointer Demangler::demangleSymbolicReference(unsigned char rawKind,
     return nullptr;
   
   // Types register as substitutions even when symbolically referenced.
+  // OOPS: Except for opaque type references!
   if (kind == SymbolicReferenceKind::Context &&
-      resolved->getKind() != Node::Kind::OpaqueTypeDescriptorSymbolicReference)
+      resolved->getKind() != Node::Kind::OpaqueTypeDescriptorSymbolicReference &&
+      resolved->getKind() != Node::Kind::OpaqueReturnTypeOf)
     addSubstitution(resolved);
   return resolved;
 }
@@ -732,7 +736,7 @@ recur:
       goto recur;
     case 1: case 2:   case 3:   case 4:   case 5: case 6: case 7: case 8:
     case 9: case 0xA: case 0xB: case 0xC:
-      return demangleSymbolicReference((unsigned char)c, Text.data() + Pos);
+      return demangleSymbolicReference((unsigned char)c);
     case 'A': return demangleMultiSubstitutions();
     case 'B': return demangleBuiltinType();
     case 'C': return demangleAnyGenericType(Node::Kind::Class);
@@ -1730,6 +1734,14 @@ NodePointer Demangler::demangleImplResultConvention(Node::Kind ConvKind) {
                          createNode(Node::Kind::ImplConvention, attr));
 }
 
+NodePointer Demangler::demangleImplDifferentiability() {
+  // Empty string represents default differentiability.
+  const char *attr = "";
+  if (nextIf('w'))
+    attr = "@noDerivative";
+  return createNode(Node::Kind::ImplDifferentiability, attr);
+}
+
 NodePointer Demangler::demangleImplFunctionType() {
   NodePointer type = createNode(Node::Kind::ImplFunctionType);
 
@@ -1773,6 +1785,11 @@ NodePointer Demangler::demangleImplFunctionType() {
   if (nextIf('e'))
     type->addChild(createNode(Node::Kind::ImplEscaping), *this);
 
+  if (nextIf('d'))
+    type->addChild(createNode(Node::Kind::ImplDifferentiable), *this);
+  if (nextIf('l'))
+    type->addChild(createNode(Node::Kind::ImplLinear), *this);
+
   const char *CAttr = nullptr;
   switch (nextChar()) {
     case 'y': CAttr = "@callee_unowned"; break;
@@ -1810,8 +1827,10 @@ NodePointer Demangler::demangleImplFunctionType() {
 
   int NumTypesToAdd = 0;
   while (NodePointer Param =
-           demangleImplParamConvention(Node::Kind::ImplParameter)) {
+             demangleImplParamConvention(Node::Kind::ImplParameter)) {
     type = addChild(type, Param);
+    if (NodePointer Diff = demangleImplDifferentiability())
+      Param = addChild(Param, Diff);
     NumTypesToAdd++;
   }
   while (NodePointer Result = demangleImplResultConvention(
@@ -2791,6 +2810,14 @@ NodePointer Demangler::demangleSpecialType() {
       return popFunctionType(Node::Kind::ObjCBlock);
     case 'C':
       return popFunctionType(Node::Kind::CFunctionPointer);
+    case 'F':
+      return popFunctionType(Node::Kind::DifferentiableFunctionType);
+    case 'G':
+      return popFunctionType(Node::Kind::EscapingDifferentiableFunctionType);
+    case 'H':
+      return popFunctionType(Node::Kind::LinearFunctionType);
+    case 'I':
+      return popFunctionType(Node::Kind::EscapingLinearFunctionType);
     case 'o':
       return createType(createWithChild(Node::Kind::Unowned,
                                         popNode(Node::Kind::Type)));

@@ -571,8 +571,7 @@ bool UnqualifiedLookupFactory::wouldUseASTScopesForLookupIfItWereEnabled()
     const {
   if (!Loc.isValid())
     return false;
-  const auto *const SF = DC->getParentSourceFile();
-  return SF && SF->isSuitableForASTScopes();
+  return (bool) DC->getParentSourceFile();
 }
 
 #pragma mark context-based lookup definitions
@@ -1048,7 +1047,6 @@ void UnqualifiedLookupFactory::setAsideUnavailableResults(
 
 void UnqualifiedLookupFactory::recordDependencyOnTopLevelName(
     DeclContext *topLevelContext, DeclNameRef name, bool isCascadingUse) {
-  recordLookupOfTopLevelName(topLevelContext, Name.getFullName(), isCascadingUse);
   recordedSF = dyn_cast<SourceFile>(topLevelContext);
   recordedIsCascadingUse = isCascadingUse;
 }
@@ -1222,7 +1220,7 @@ bool ASTScopeDeclConsumerForUnqualifiedLookup::consume(
   for (auto *value: values) {
     if (factory.isOriginallyTypeLookup && !isa<TypeDecl>(value))
       continue;
-    if (!value->getFullName().matchesRef(factory.Name.getFullName()))
+    if (!value->getName().matchesRef(factory.Name.getFullName()))
       continue;
 
     // In order to preserve the behavior of the existing context-based lookup,
@@ -1274,7 +1272,7 @@ bool ASTScopeDeclConsumerForUnqualifiedLookup::lookInMembers(
   return factory.isFirstResultEnough();
 }
 
-llvm::Expected<LookupResult>
+LookupResult
 UnqualifiedLookupRequest::evaluate(Evaluator &evaluator,
                                    UnqualifiedLookupDescriptor desc) const {
   SmallVector<LookupResultEntry, 4> results;
@@ -1448,7 +1446,7 @@ bool UnqualifiedLookupFactory::shouldDiffer() const {
     "swift/test/TypeCoercion/overload_noncall.swift",
     "swift/test/expr/capture/nested_class.swift",
     "swift/test/expr/capture/order.swift",
-    "swift/test/NameBinding/name-binding.swift"
+    "swift/test/NameLookup/name_lookup2.swift"
   };
   StringRef fileName = SF->getFilename();
   return llvm::any_of(testsThatShouldDiffer, [&](const char *testFile) {

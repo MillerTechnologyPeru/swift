@@ -33,7 +33,7 @@ public:
   LLVM_ATTRIBUTE_RETURNS_NONNULL void *Allocate(size_t size, size_t alignment);
   using AllocatorBase<MetadataAllocator>::Allocate;
 
-  void Deallocate(const void *Ptr, size_t size);
+  void Deallocate(const void *Ptr, size_t size, size_t alignment);
   using AllocatorBase<MetadataAllocator>::Deallocate;
 
   void PrintStats() const {}
@@ -471,7 +471,7 @@ public:
 
 private:
   uint32_t computeHash() const {
-    size_t H = 0x56ba80d1 * NumKeyParameters;
+    size_t H = 0x56ba80d1u * NumKeyParameters;
     for (unsigned index = 0; index != NumKeyParameters; ++index) {
       H = (H >> 10) | (H << ((sizeof(size_t) * 8) - 10));
       H ^= (reinterpret_cast<size_t>(Data[index])
@@ -1076,7 +1076,7 @@ private:
     case LSK::CompletionQueue:
       // Move the existing completion queue to the cache entry.
       queueEntry->CompletionQueue = LockedStorage.CompletionQueue;
-      LLVM_FALLTHROUGH;
+      SWIFT_FALLTHROUGH;
 
     case LSK::AllocatingThread:
       LockedStorageKind = LSK::QueueEntry;

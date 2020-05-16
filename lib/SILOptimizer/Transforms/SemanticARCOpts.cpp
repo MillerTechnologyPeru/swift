@@ -13,6 +13,7 @@
 #define DEBUG_TYPE "sil-semantic-arc-opts"
 #include "swift/Basic/BlotSetVector.h"
 #include "swift/Basic/FrozenMultiMap.h"
+#include "swift/Basic/MultiMapCache.h"
 #include "swift/Basic/STLExtras.h"
 #include "swift/SIL/BasicBlockUtils.h"
 #include "swift/SIL/DebugUtils.h"
@@ -51,8 +52,23 @@ class LiveRange {
   /// introducer and not to be forwarding.
   OwnedValueIntroducer introducer;
 
+  /// A vector that we store all of our uses into.
+  ///
+  /// Some properties of this array are:
+  ///
+  /// 1. It is only mutated in the constructor of LiveRange.
+  ///
+  /// 2. destroyingUses, ownershipForwardingUses, and unknownConsumingUses are
+  /// views into this array. We store the respective uses in the aforementioned
+  /// order. This is why it is important not to mutate consumingUses after we
+  /// construct the LiveRange since going from small -> large could invalidate
+  /// the uses.
+  SmallVector<Operand *, 6> consumingUses;
+
   /// A list of destroy_values of the live range.
-  SmallVector<Operand *, 2> destroyingUses;
+  ///
+  /// This is just a view into consuming uses.
+  ArrayRef<Operand *> destroyingUses;
 
   /// A list of forwarding instructions that forward owned ownership, but that
   /// are also able to be converted to guaranteed ownership. If we are able to
@@ -60,12 +76,12 @@ class LiveRange {
   /// flip the ownership of all of these instructions to guaranteed from owned.
   ///
   /// Corresponds to isOwnershipForwardingInst(...).
-  SmallVector<Operand *, 2> ownershipForwardingUses;
+  ArrayRef<Operand *> ownershipForwardingUses;
 
   /// Consuming uses that we were not able to understand as a forwarding
   /// instruction or a destroy_value. These must be passed a strongly control
   /// equivalent +1 value.
-  SmallVector<Operand *, 2> unknownConsumingUses;
+  ArrayRef<Operand *> unknownConsumingUses;
 
 public:
   LiveRange(SILValue value);
@@ -85,6 +101,11 @@ public:
   /// or another function implying it can be used everywhere at +0.
   HasConsumingUse_t
   hasUnknownConsumingUse(bool assumingFixedPoint = false) const;
+
+  /// Return an array ref to /all/ consuming uses. Will include all 3 sorts of
+  /// consuming uses: destroying uses, forwarding consuming uses, and unknown
+  /// forwarding instruction.
+  ArrayRef<Operand *> getAllConsumingUses() const { return consumingUses; }
 
   ArrayRef<Operand *> getDestroyingUses() const { return destroyingUses; }
 
@@ -120,7 +141,7 @@ public:
     return ownershipForwardingUses;
   }
 
-  void convertOwnedGeneralForwardingUsesToGuaranteed();
+  void convertOwnedGeneralForwardingUsesToGuaranteed() &&;
 
   /// A consuming operation that:
   ///
@@ -191,6 +212,10 @@ LiveRange::LiveRange(SILValue value)
       ownershipForwardingUses(), unknownConsumingUses() {
   assert(introducer.value.getOwnershipKind() == ValueOwnershipKind::Owned);
 
+  SmallVector<Operand *, 32> tmpDestroyingUses;
+  SmallVector<Operand *, 32> tmpForwardingConsumingUses;
+  SmallVector<Operand *, 32> tmpUnknownConsumingUses;
+
   // We know that our silvalue produces an @owned value. Look through all of our
   // uses and classify them as either consuming or not.
   SmallVector<Operand *, 32> worklist(introducer.value->getUses());
@@ -219,7 +244,7 @@ LiveRange::LiveRange(SILValue value)
     // Ok, we know now that we have a consuming use. See if we have a destroy
     // value, quickly up front. If we do have one, stash it and continue.
     if (isa<DestroyValueInst>(user)) {
-      destroyingUses.push_back(op);
+      tmpDestroyingUses.push_back(op);
       continue;
     }
 
@@ -243,13 +268,13 @@ LiveRange::LiveRange(SILValue value)
                         return v.getOwnershipKind() ==
                                ValueOwnershipKind::Owned;
                       })) {
-      unknownConsumingUses.push_back(op);
+      tmpUnknownConsumingUses.push_back(op);
       continue;
     }
 
     // Ok, this is a forwarding instruction whose ownership we can flip from
     // owned -> guaranteed.
-    ownershipForwardingUses.push_back(op);
+    tmpForwardingConsumingUses.push_back(op);
 
     // If we have a non-terminator, just visit its users recursively to see if
     // the the users force the live range to be alive.
@@ -283,6 +308,20 @@ LiveRange::LiveRange(SILValue value)
       }
     }
   }
+
+  // The order in which we append these to consumingUses matters since we assume
+  // their order as an invariant. This is done to ensure that we can pass off
+  // all of our uses or individual sub-arrays of our users without needing to
+  // move around memory.
+  llvm::copy(tmpDestroyingUses, std::back_inserter(consumingUses));
+  llvm::copy(tmpForwardingConsumingUses, std::back_inserter(consumingUses));
+  llvm::copy(tmpUnknownConsumingUses, std::back_inserter(consumingUses));
+
+  auto cUseArrayRef = llvm::makeArrayRef(consumingUses);
+  destroyingUses = cUseArrayRef.take_front(tmpDestroyingUses.size());
+  ownershipForwardingUses = cUseArrayRef.slice(
+      tmpDestroyingUses.size(), tmpForwardingConsumingUses.size());
+  unknownConsumingUses = cUseArrayRef.take_back(tmpUnknownConsumingUses.size());
 }
 
 void LiveRange::insertEndBorrowsAtDestroys(
@@ -338,9 +377,10 @@ void LiveRange::insertEndBorrowsAtDestroys(
   }
 }
 
-void LiveRange::convertOwnedGeneralForwardingUsesToGuaranteed() {
+void LiveRange::convertOwnedGeneralForwardingUsesToGuaranteed() && {
   while (!ownershipForwardingUses.empty()) {
-    auto *i = ownershipForwardingUses.pop_back_val()->getUser();
+    auto *i = ownershipForwardingUses.back()->getUser();
+    ownershipForwardingUses = ownershipForwardingUses.drop_back();
 
     // If this is a term inst, just convert all of its incoming values that are
     // owned to be guaranteed.
@@ -401,7 +441,8 @@ void LiveRange::convertToGuaranteedAndRAUW(SILValue newGuaranteedValue,
                                            InstModCallbacks callbacks) && {
   auto *value = cast<SingleValueInstruction>(introducer.value);
   while (!destroyingUses.empty()) {
-    auto *d = destroyingUses.pop_back_val();
+    auto *d = destroyingUses.back();
+    destroyingUses = destroyingUses.drop_back();
     callbacks.deleteInst(d->getUser());
     ++NumEliminatedInsts;
   }
@@ -411,7 +452,7 @@ void LiveRange::convertToGuaranteedAndRAUW(SILValue newGuaranteedValue,
   // Then change all of our guaranteed forwarding insts to have guaranteed
   // ownership kind instead of what ever they previously had (ignoring trivial
   // results);
-  convertOwnedGeneralForwardingUsesToGuaranteed();
+  std::move(*this).convertOwnedGeneralForwardingUsesToGuaranteed();
 }
 
 void LiveRange::convertArgToGuaranteed(DeadEndBlocks &deadEndBlocks,
@@ -428,7 +469,8 @@ void LiveRange::convertArgToGuaranteed(DeadEndBlocks &deadEndBlocks,
 
   // Then eliminate all of the destroys...
   while (!destroyingUses.empty()) {
-    auto *d = destroyingUses.pop_back_val();
+    auto *d = destroyingUses.back();
+    destroyingUses = destroyingUses.drop_back();
     callbacks.deleteInst(d->getUser());
     ++NumEliminatedInsts;
   }
@@ -436,7 +478,7 @@ void LiveRange::convertArgToGuaranteed(DeadEndBlocks &deadEndBlocks,
   // and change all of our guaranteed forwarding insts to have guaranteed
   // ownership kind instead of what ever they previously had (ignoring trivial
   // results);
-  convertOwnedGeneralForwardingUsesToGuaranteed();
+  std::move(*this).convertOwnedGeneralForwardingUsesToGuaranteed();
 }
 
 LiveRange::HasConsumingUse_t
@@ -477,35 +519,13 @@ LiveRange::hasUnknownConsumingUse(bool assumingAtFixPoint) const {
 //                        Address Written To Analysis
 //===----------------------------------------------------------------------===//
 
-namespace {
-
-/// A simple analysis that checks if a specific def (in our case an inout
-/// argument) is ever written to. This is conservative, local and processes
-/// recursively downwards from def->use.
-struct IsAddressWrittenToDefUseAnalysis {
-  llvm::SmallDenseMap<SILValue, bool, 8> isWrittenToCache;
-
-  bool operator()(SILValue value) {
-    auto iter = isWrittenToCache.try_emplace(value, true);
-
-    // If we are already in the map, just return that.
-    if (!iter.second)
-      return iter.first->second;
-
-    // Otherwise, compute our value, cache it and return.
-    bool result = isWrittenToHelper(value);
-    iter.first->second = result;
-    return result;
-  }
-
-private:
-  bool isWrittenToHelper(SILValue value);
-};
-
-} // end anonymous namespace
-
-bool IsAddressWrittenToDefUseAnalysis::isWrittenToHelper(SILValue initialValue) {
+/// Returns true if we were able to ascertain that either the initialValue has
+/// no write uses or all of the write uses were writes that we could understand.
+static bool
+constructCacheValue(SILValue initialValue,
+                    SmallVectorImpl<Operand *> &wellBehavedWriteAccumulator) {
   SmallVector<Operand *, 8> worklist(initialValue->getUses());
+
   while (!worklist.empty()) {
     auto *op = worklist.pop_back_val();
     SILInstruction *user = op->getUser();
@@ -521,11 +541,24 @@ bool IsAddressWrittenToDefUseAnalysis::isWrittenToHelper(SILValue initialValue) 
     if (auto *oeai = dyn_cast<OpenExistentialAddrInst>(user)) {
       // Mutable access!
       if (oeai->getAccessKind() != OpenedExistentialAccess::Immutable) {
-        return true;
+        wellBehavedWriteAccumulator.push_back(op);
       }
 
       //  Otherwise, look through it and continue.
       llvm::copy(oeai->getUses(), std::back_inserter(worklist));
+      continue;
+    }
+
+    if (auto *si = dyn_cast<StoreInst>(user)) {
+      // We must be the dest since addresses can not be stored.
+      assert(si->getDest() == op->get());
+      wellBehavedWriteAccumulator.push_back(op);
+      continue;
+    }
+
+    // Add any destroy_addrs to the resultAccumulator.
+    if (isa<DestroyAddrInst>(user)) {
+      wellBehavedWriteAccumulator.push_back(op);
       continue;
     }
 
@@ -534,49 +567,71 @@ bool IsAddressWrittenToDefUseAnalysis::isWrittenToHelper(SILValue initialValue) 
       continue;
     }
 
-    // Look through immutable begin_access.
+    // Look through begin_access and mark them/their end_borrow as users.
     if (auto *bai = dyn_cast<BeginAccessInst>(user)) {
-      // If we do not have a read, return true.
+      // If we do not have a read, mark this as a write. Also, insert our
+      // end_access as well.
       if (bai->getAccessKind() != SILAccessKind::Read) {
-        return true;
+        wellBehavedWriteAccumulator.push_back(op);
+        transform(bai->getUsersOfType<EndAccessInst>(),
+                  std::back_inserter(wellBehavedWriteAccumulator),
+                  [](EndAccessInst *eai) { return &eai->getAllOperands()[0]; });
       }
 
-      // Otherwise, add the users to the worklist and continue.
+      // And then add the users to the worklist and continue.
       llvm::copy(bai->getUses(), std::back_inserter(worklist));
       continue;
     }
 
-    // As long as we do not have a load [take], we are fine.
+    // If we have a load, we just need to mark the load [take] as a write.
     if (auto *li = dyn_cast<LoadInst>(user)) {
       if (li->getOwnershipQualifier() == LoadOwnershipQualifier::Take) {
-        return true;
+        wellBehavedWriteAccumulator.push_back(op);
       }
       continue;
     }
 
-    // If we have a FullApplySite, see if we use the value as an
-    // indirect_guaranteed parameter. If we use it as inout, we need
-    // interprocedural analysis that we do not perform here.
+    // If we have a FullApplySite, we need to do per convention/inst logic.
     if (auto fas = FullApplySite::isa(user)) {
+      // Begin by seeing if we have an in_guaranteed use. If we do, we are done.
       if (fas.getArgumentConvention(*op) ==
-          SILArgumentConvention::Indirect_In_Guaranteed)
+          SILArgumentConvention::Indirect_In_Guaranteed) {
         continue;
+      }
 
-      // Otherwise, be conservative and return true.
-      return true;
+      // Then see if we have an apply site that is not a coroutine apply
+      // site. In such a case, without further analysis, we can treat it like an
+      // instantaneous write and validate that it doesn't overlap with our load
+      // [copy].
+      if (!fas.beginsCoroutineEvaluation() &&
+          fas.getArgumentConvention(*op).isInoutConvention()) {
+        wellBehavedWriteAccumulator.push_back(op);
+        continue;
+      }
+
+      // Otherwise, be conservative and return that we had a write that we did
+      // not understand.
+      LLVM_DEBUG(llvm::dbgs()
+                 << "Function: " << user->getFunction()->getName() << "\n");
+      LLVM_DEBUG(llvm::dbgs() << "Value: " << op->get());
+      LLVM_DEBUG(llvm::dbgs() << "Unhandled apply site!: " << *user);
+
+      return false;
     }
 
     // Copy addr that read are just loads.
     if (auto *cai = dyn_cast<CopyAddrInst>(user)) {
       // If our value is the destination, this is a write.
       if (cai->getDest() == op->get()) {
-        return true;
+        wellBehavedWriteAccumulator.push_back(op);
+        continue;
       }
 
       // Ok, so we are Src by process of elimination. Make sure we are not being
       // taken.
       if (cai->isTakeOfSrc()) {
-        return true;
+        wellBehavedWriteAccumulator.push_back(op);
+        continue;
       }
 
       // Otherwise, we are safe and can continue.
@@ -584,16 +639,16 @@ bool IsAddressWrittenToDefUseAnalysis::isWrittenToHelper(SILValue initialValue) 
     }
 
     // If we did not recognize the user, just return conservatively that it was
-    // written to.
+    // written to in a way we did not understand.
     LLVM_DEBUG(llvm::dbgs()
                << "Function: " << user->getFunction()->getName() << "\n");
     LLVM_DEBUG(llvm::dbgs() << "Value: " << op->get());
     LLVM_DEBUG(llvm::dbgs() << "Unknown instruction!: " << *user);
-    return true;
+    return false;
   }
 
   // Ok, we finished our worklist and this address is not being written to.
-  return false;
+  return true;
 }
 
 //===----------------------------------------------------------------------===//
@@ -623,7 +678,7 @@ struct SemanticARCOptVisitor
   SILFunction &F;
   Optional<DeadEndBlocks> TheDeadEndBlocks;
   ValueLifetimeAnalysis::Frontier lifetimeFrontier;
-  IsAddressWrittenToDefUseAnalysis isAddressWrittenToDefUseAnalysis;
+  SmallMultiMapCache<SILValue, Operand *> addressToExhaustiveWriteListCache;
 
   /// Are we assuming that we reached a fix point and are re-processing to
   /// prepare to use the phiToIncomingValueMultiMap.
@@ -658,7 +713,8 @@ struct SemanticARCOptVisitor
   using FrozenMultiMapRange =
       decltype(joinedOwnedIntroducerToConsumedOperands)::PairToSecondEltRange;
 
-  explicit SemanticARCOptVisitor(SILFunction &F) : F(F) {}
+  explicit SemanticARCOptVisitor(SILFunction &F)
+      : F(F), addressToExhaustiveWriteListCache(constructCacheValue) {}
 
   DeadEndBlocks &getDeadEndBlocks() {
     if (!TheDeadEndBlocks)
@@ -776,6 +832,10 @@ struct SemanticARCOptVisitor
   FORWARDING_INST(OpenExistentialBoxValue)
   FORWARDING_INST(MarkDependence)
   FORWARDING_INST(InitExistentialRef)
+  FORWARDING_INST(DifferentiableFunction)
+  FORWARDING_INST(LinearFunction)
+  FORWARDING_INST(DifferentiableFunctionExtract)
+  FORWARDING_INST(LinearFunctionExtract)
 #undef FORWARDING_INST
 
 #define FORWARDING_TERM(NAME)                                                  \
@@ -1303,8 +1363,9 @@ bool SemanticARCOptVisitor::performGuaranteedCopyValueOptimization(CopyValueInst
     SmallVector<Operand *, 8> scratchSpace;
     SmallPtrSet<SILBasicBlock *, 4> visitedBlocks;
     if (llvm::any_of(borrowScopeIntroducers, [&](BorrowedValue borrowScope) {
-          return !borrowScope.areUsesWithinScope(
-              destroys, scratchSpace, visitedBlocks, getDeadEndBlocks());
+          return !borrowScope.areUsesWithinScope(lr.getAllConsumingUses(),
+                                                 scratchSpace, visitedBlocks,
+                                                 getDeadEndBlocks());
         })) {
       return false;
     }
@@ -1336,12 +1397,11 @@ bool SemanticARCOptVisitor::performGuaranteedCopyValueOptimization(CopyValueInst
         return false;
       }
 
-      if (llvm::any_of(borrowScopeIntroducers,
-                       [&](BorrowedValue borrowScope) {
-                         return !borrowScope.areUsesWithinScope(
-                             phiArgLR.getDestroyingUses(), scratchSpace,
-                             visitedBlocks, getDeadEndBlocks());
-                       })) {
+      if (llvm::any_of(borrowScopeIntroducers, [&](BorrowedValue borrowScope) {
+            return !borrowScope.areUsesWithinScope(
+                phiArgLR.getAllConsumingUses(), scratchSpace, visitedBlocks,
+                getDeadEndBlocks());
+          })) {
         return false;
       }
     }
@@ -1647,7 +1707,7 @@ public:
     SmallPtrSet<SILBasicBlock *, 4> visitedBlocks;
     LinearLifetimeChecker checker(visitedBlocks, ARCOpt.getDeadEndBlocks());
     if (!checker.validateLifetime(access, endScopeUses,
-                                  liveRange.getDestroyingUses())) {
+                                  liveRange.getAllConsumingUses())) {
       // If we fail the linear lifetime check, then just recur:
       return next(access->getOperand());
     }
@@ -1659,7 +1719,16 @@ public:
 
     // If we have a modify, check if our value is /ever/ written to. If it is
     // never actually written to, then we convert to a load_borrow.
-    return answer(ARCOpt.isAddressWrittenToDefUseAnalysis(access));
+    auto result = ARCOpt.addressToExhaustiveWriteListCache.get(access);
+    if (!result.hasValue()) {
+      return answer(true);
+    }
+
+    if (result.getValue().empty()) {
+      return answer(false);
+    }
+
+    return answer(true);
   }
   
   void visitArgumentAccess(SILFunctionArgument *arg) {
@@ -1672,7 +1741,63 @@ public:
     // If we have an inout parameter that isn't ever actually written to, return
     // false.
     if (arg->getKnownParameterInfo().isIndirectMutating()) {
-      return answer(ARCOpt.isAddressWrittenToDefUseAnalysis(arg));
+      auto wellBehavedWrites =
+          ARCOpt.addressToExhaustiveWriteListCache.get(arg);
+      if (!wellBehavedWrites.hasValue()) {
+        return answer(true);
+      }
+
+      // No writes.
+      if (wellBehavedWrites->empty()) {
+        return answer(false);
+      }
+
+      // Ok, we have some writes. See if any of them are within our live
+      // range. If any are, we definitely can not promote to load_borrow.
+      SmallPtrSet<SILBasicBlock *, 4> visitedBlocks;
+      SmallVector<BeginAccessInst *, 16> foundBeginAccess;
+      LinearLifetimeChecker checker(visitedBlocks, ARCOpt.getDeadEndBlocks());
+      SILValue introducerValue = liveRange.getIntroducer().value;
+      if (!checker.usesNotContainedWithinLifetime(introducerValue,
+                                                  liveRange.getDestroyingUses(),
+                                                  *wellBehavedWrites)) {
+        return answer(true);
+      }
+
+      // Finally, check if our live range is strictly contained within any of
+      // our scoped writes.
+      SmallVector<Operand *, 16> endAccessList;
+      for (Operand *use : *wellBehavedWrites) {
+        auto *bai = dyn_cast<BeginAccessInst>(use->getUser());
+        if (!bai) {
+          continue;
+        }
+
+        endAccessList.clear();
+        llvm::transform(
+            bai->getUsersOfType<EndAccessInst>(),
+            std::back_inserter(endAccessList),
+            [](EndAccessInst *eai) { return &eai->getAllOperands()[0]; });
+        visitedBlocks.clear();
+
+        // We know that our live range is based on a load [copy], so we know
+        // that our value must have a defining inst.
+        auto *definingInst =
+            cast<LoadInst>(introducerValue->getDefiningInstruction());
+
+        // Then if our defining inst is not in our bai, endAccessList region, we
+        // know that the two ranges must be disjoint, so continue.
+        if (!checker.validateLifetime(bai, endAccessList,
+                                      &definingInst->getAllOperands()[0])) {
+          continue;
+        }
+
+        // Otherwise, we do have an overlap, return true.
+        return answer(true);
+      }
+
+      // Otherwise, there isn't an overlap, so we don't write to it.
+      return answer(false);
     }
 
     // TODO: This should be extended:
@@ -1742,8 +1867,8 @@ public:
     LinearLifetimeChecker checker(visitedBlocks, ARCOpt.getDeadEndBlocks());
 
     // Returns true on success. So we invert.
-    bool foundError = !checker.validateLifetime(baseObject, endScopeInsts,
-                                                liveRange.getDestroyingUses());
+    bool foundError = !checker.validateLifetime(
+        baseObject, endScopeInsts, liveRange.getAllConsumingUses());
     return answer(foundError);
   }
   
@@ -1781,7 +1906,7 @@ public:
     // Returns true on success. So we invert.
     bool foundError = !checker.validateLifetime(
         stack, destroyAddrOperands /*consuming users*/,
-        liveRange.getDestroyingUses() /*non consuming users*/);
+        liveRange.getAllConsumingUses() /*non consuming users*/);
     return answer(foundError);
   }
 

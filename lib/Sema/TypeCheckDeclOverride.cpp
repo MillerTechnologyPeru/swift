@@ -220,8 +220,8 @@ static bool areOverrideCompatibleSimple(ValueDecl *decl,
                                         ValueDecl *parentDecl) {
   // If the number of argument labels does not match, these overrides cannot
   // be compatible.
-  if (decl->getFullName().getArgumentNames().size() !=
-        parentDecl->getFullName().getArgumentNames().size())
+  if (decl->getName().getArgumentNames().size() !=
+        parentDecl->getName().getArgumentNames().size())
     return false;
 
   // If the parent declaration is not in a class (or extension thereof) or
@@ -495,11 +495,11 @@ static void diagnoseGeneralOverrideFailure(ValueDecl *decl,
   switch (attempt) {
   case OverrideCheckingAttempt::PerfectMatch:
     diags.diagnose(decl, diag::override_multiple_decls_base,
-                   decl->getFullName());
+                   decl->getName());
     break;
   case OverrideCheckingAttempt::BaseName:
     diags.diagnose(decl, diag::override_multiple_decls_arg_mismatch,
-                   decl->getFullName());
+                   decl->getName());
     break;
   case OverrideCheckingAttempt::MismatchedOptional:
   case OverrideCheckingAttempt::MismatchedTypes:
@@ -526,9 +526,9 @@ static void diagnoseGeneralOverrideFailure(ValueDecl *decl,
 
     auto diag = diags.diagnose(matchDecl, diag::overridden_near_match_here,
                                matchDecl->getDescriptiveKind(),
-                               matchDecl->getFullName());
+                               matchDecl->getName());
     if (attempt == OverrideCheckingAttempt::BaseName) {
-      fixDeclarationName(diag, decl, matchDecl->getFullName());
+      fixDeclarationName(diag, decl, matchDecl->getName());
     }
   }
 }
@@ -655,8 +655,7 @@ static bool hasOverridingDifferentiableAttribute(ValueDecl *derivedDecl,
     // Get `@differentiable` attribute description.
     std::string baseDiffAttrString;
     llvm::raw_string_ostream os(baseDiffAttrString);
-    baseDA->print(os, derivedDecl, omitWrtClause,
-                  /*omitDerivativeFunctions*/ true);
+    baseDA->print(os, derivedDecl, omitWrtClause);
     os.flush();
     diags
         .diagnose(derivedDecl,
@@ -828,7 +827,7 @@ SmallVector<OverrideMatch, 2> OverrideMatcher::match(
   case OverrideCheckingAttempt::PerfectMatch:
   case OverrideCheckingAttempt::MismatchedOptional:
   case OverrideCheckingAttempt::MismatchedTypes:
-    name = decl->getFullName();
+    name = decl->getName();
     break;
   case OverrideCheckingAttempt::BaseName:
   case OverrideCheckingAttempt::BaseNameWithMismatchedOptional:
@@ -1054,12 +1053,12 @@ bool OverrideMatcher::checkOverride(ValueDecl *baseDecl,
 
   // If the name of our match differs from the name we were looking for,
   // complain.
-  if (decl->getFullName() != baseDecl->getFullName()) {
+  if (decl->getName() != baseDecl->getName()) {
     auto diag = diags.diagnose(decl, diag::override_argument_name_mismatch,
                                isa<ConstructorDecl>(decl),
-                               decl->getFullName(),
-                               baseDecl->getFullName());
-    fixDeclarationName(diag, decl, baseDecl->getFullName());
+                               decl->getName(),
+                               baseDecl->getName());
+    fixDeclarationName(diag, decl, baseDecl->getName());
     emittedMatchError = true;
   }
 
@@ -1140,7 +1139,7 @@ bool OverrideMatcher::checkOverride(ValueDecl *baseDecl,
       noteFixableMismatchedTypes(decl, baseDecl);
       diags.diagnose(baseDecl, diag::overridden_near_match_here,
                      baseDecl->getDescriptiveKind(),
-                     baseDecl->getFullName());
+                     baseDecl->getName());
       emittedMatchError = true;
 
     } else if (!isa<AccessorDecl>(method) &&
@@ -1172,7 +1171,7 @@ bool OverrideMatcher::checkOverride(ValueDecl *baseDecl,
       noteFixableMismatchedTypes(decl, baseDecl);
       diags.diagnose(baseDecl, diag::overridden_near_match_here,
                      baseDecl->getDescriptiveKind(),
-                     baseDecl->getFullName());
+                     baseDecl->getName());
       emittedMatchError = true;
 
     } else if (mayHaveMismatchedOptionals) {
@@ -1326,8 +1325,8 @@ bool swift::checkOverrides(ValueDecl *decl) {
     case OverrideCheckingAttempt::BaseName:
       // Don't keep looking if this is already a simple name, or if there
       // are no arguments.
-      if (decl->getFullName() == decl->getBaseName() ||
-          decl->getFullName().getArgumentNames().empty())
+      if (decl->getName() == decl->getBaseName() ||
+          decl->getName().getArgumentNames().empty())
         return false;
       break;
     case OverrideCheckingAttempt::BaseNameWithMismatchedOptional:
@@ -1449,11 +1448,13 @@ namespace  {
     UNINTERESTING_ATTR(Specialize)
     UNINTERESTING_ATTR(DynamicReplacement)
     UNINTERESTING_ATTR(PrivateImport)
+    UNINTERESTING_ATTR(MainType)
 
     // Differentiation-related attributes.
     UNINTERESTING_ATTR(Differentiable)
     UNINTERESTING_ATTR(Derivative)
     UNINTERESTING_ATTR(Transpose)
+    UNINTERESTING_ATTR(NoDerivative)
 
     // These can't appear on overridable declarations.
     UNINTERESTING_ATTR(Prefix)
@@ -1531,7 +1532,7 @@ namespace  {
       // Complain.
       Diags.diagnose(Override, diag::override_swift3_objc_inference,
                      Override->getDescriptiveKind(),
-                     Override->getFullName(),
+                     Override->getName(),
                      Base->getDeclContext()
                        ->getSelfNominalTypeDecl()
                        ->getName());
@@ -1691,8 +1692,7 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
     // Make sure that the overriding property doesn't have storage.
     if ((overrideASD->hasStorage() ||
          overrideASD->getAttrs().hasAttribute<LazyAttr>()) &&
-        !(overrideASD->getParsedAccessor(AccessorKind::WillSet) ||
-          overrideASD->getParsedAccessor(AccessorKind::DidSet))) {
+        !overrideASD->hasObservers()) {
       bool downgradeToWarning = false;
       if (!ctx.isSwiftVersionAtLeast(5) &&
           overrideASD->getAttrs().hasAttribute<LazyAttr>()) {
@@ -1705,7 +1705,7 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
           diag::override_with_stored_property_warn :
           diag::override_with_stored_property;
       diags.diagnose(overrideASD, diagID,
-                     overrideASD->getBaseName().getIdentifier());
+                     overrideASD->getBaseIdentifier());
       diags.diagnose(baseASD, diag::property_override_here);
       if (!downgradeToWarning)
         return true;
@@ -1722,7 +1722,7 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
     if (overrideASD->getWriteImpl() == WriteImplKind::InheritedWithObservers
         && !baseIsSettable) {
       diags.diagnose(overrideASD, diag::observing_readonly_property,
-                     overrideASD->getBaseName().getIdentifier());
+                     overrideASD->getBaseIdentifier());
       diags.diagnose(baseASD, diag::property_override_here);
       return true;
     }
@@ -1732,7 +1732,7 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
     // setter but override the getter, and that would be surprising at best.
     if (baseIsSettable && !overrideASD->isSettable(override->getDeclContext())) {
       diags.diagnose(overrideASD, diag::override_mutable_with_readonly_property,
-                     overrideASD->getBaseName().getIdentifier());
+                     overrideASD->getBaseIdentifier());
       diags.diagnose(baseASD, diag::property_override_here);
       return true;
     }
@@ -1968,7 +1968,7 @@ computeOverriddenAssociatedTypes(AssociatedTypeDecl *assocType) {
   return overriddenAssocTypes;
 }
 
-llvm::Expected<llvm::TinyPtrVector<ValueDecl *>>
+llvm::TinyPtrVector<ValueDecl *>
 OverriddenDeclsRequest::evaluate(Evaluator &evaluator, ValueDecl *decl) const {
   // Value to return in error cases
   auto noResults = llvm::TinyPtrVector<ValueDecl *>();
@@ -2083,9 +2083,8 @@ OverriddenDeclsRequest::evaluate(Evaluator &evaluator, ValueDecl *decl) const {
                                          OverrideCheckingAttempt::PerfectMatch);
 }
 
-llvm::Expected<bool>
-IsABICompatibleOverrideRequest::evaluate(Evaluator &evaluator,
-                                         ValueDecl *decl) const {
+bool IsABICompatibleOverrideRequest::evaluate(Evaluator &evaluator,
+                                              ValueDecl *decl) const {
   auto base = decl->getOverriddenDecl();
   if (!base)
     return false;

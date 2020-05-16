@@ -113,8 +113,10 @@ static SourceKit::Context *GlobalCtx = nullptr;
 
 void sourcekitd::initialize() {
   llvm::EnablePrettyStackTrace();
-  GlobalCtx = new SourceKit::Context(sourcekitd::getRuntimeLibPath(),
-                                     SourceKit::createSwiftLangSupport);
+  GlobalCtx =
+      new SourceKit::Context(sourcekitd::getRuntimeLibPath(),
+                             sourcekitd::getDiagnosticDocumentationPath(),
+                             SourceKit::createSwiftLangSupport);
   GlobalCtx->getNotificationCenter()->addDocumentUpdateNotificationReceiver(
     onDocumentUpdateNotification);
 }
@@ -438,9 +440,21 @@ void handleRequestImpl(sourcekitd_object_t ReqObj, ResponseReceiver Rec) {
     if (!Req.getInt64(KeyOptimizeForIDE, EditorMode, true)) {
       OptimizeForIDE = EditorMode;
     }
+    Optional<unsigned> CompletionCheckDependencyInterval;
+    int64_t IntervalValue = 0;
+    if (!Req.getInt64(KeyCompletionCheckDependencyInterval,
+                      IntervalValue, /*isOptional=*/true))
+      CompletionCheckDependencyInterval = IntervalValue;
 
-    GlobalConfig::Settings UpdatedConfig = Config->update(OptimizeForIDE);
+    GlobalConfig::Settings UpdatedConfig = Config->update(
+        OptimizeForIDE, CompletionCheckDependencyInterval);
+
+    getGlobalContext().getSwiftLangSupport().globalConfigurationUpdated(Config);
+
     dict.set(KeyOptimizeForIDE, UpdatedConfig.OptimizeForIDE);
+    dict.set(KeyCompletionCheckDependencyInterval,
+             UpdatedConfig.CompletionCheckDependencyInterval);
+
     return Rec(RB.createResponse());
   }
   if (ReqUID == RequestProtocolVersion) {
@@ -1152,7 +1166,11 @@ static void handleSemanticRequest(
     else
       return Rec(createErrorRequestInvalid("'key.namekind' is unrecognizable"));
     if (auto Base = Req.getString(KeyBaseName)) {
-      Input.BaseName = Base.getValue();
+      if (Input.NameKind == UIDKindNameSwift) {
+        Input.BaseName = Base.getValue().trim('`');
+      } else {
+        Input.BaseName = Base.getValue();
+      }
     }
     llvm::SmallVector<const char*, 4> ArgParts;
     llvm::SmallVector<const char*, 4> Selectors;
@@ -1164,7 +1182,7 @@ static void handleSemanticRequest(
     }
     std::transform(ArgParts.begin(), ArgParts.end(),
                    std::back_inserter(Input.ArgNames),
-                   [](const char *C) { return StringRef(C); });
+                   [](const char *C) { return StringRef(C).trim('`'); });
     std::transform(Selectors.begin(), Selectors.end(),
                    std::back_inserter(Input.ArgNames),
                    [](const char *C) { return StringRef(C); });
@@ -1422,9 +1440,7 @@ public:
   }
 
   sourcekitd_response_t createResponse() {
-    TopDict.setCustomBuffer(KeyAnnotations,
-        CustomBufferKind::DocSupportAnnotationArray,
-        AnnotationsBuilder.createBuffer());
+    TopDict.setCustomBuffer(KeyAnnotations, AnnotationsBuilder.createBuffer());
     return RespBuilder.createResponse();
   }
 
@@ -1573,11 +1589,15 @@ void SKDocConsumer::addDocEntityInfoToDict(const DocEntityInfo &Info,
   // while GenericParams is empty.
   if (!Info.GenericRequirements.empty()) {
     auto ReqArray = Elem.setArray(KeyGenericRequirements);
+
     for (auto &Req : Info.GenericRequirements) {
       auto ReqElem = ReqArray.appendDictionary();
       ReqElem.set(KeyDescription, Req);
     }
   }
+
+  if (!Info.RequiredBystanders.empty())
+    Elem.set(KeyRequiredBystanders, Info.RequiredBystanders);
 }
 
 void SKDocConsumer::failed(StringRef ErrDescription) {
@@ -1862,8 +1882,7 @@ static void reportExpressionTypeInfo(const RequestResult<ExpressionTypesInFile> 
   for (auto &R: Info.Results) {
     ArrBuilder.add(R);
   }
-  Dict.setCustomBuffer(KeyExpressionTypeList, CustomBufferKind::ExpressionTypeArray,
-                       ArrBuilder.createBuffer());
+  Dict.setCustomBuffer(KeyExpressionTypeList, ArrBuilder.createBuffer());
   Rec(Builder.createResponse());
 }
 
@@ -1920,8 +1939,7 @@ public:
       return createErrorRequestFailed(ErrorDescription.c_str());
 
     RespBuilder.getDictionary().setCustomBuffer(KeyResults,
-        CustomBufferKind::CodeCompletionResultsArray,
-        ResultsBuilder.createBuffer());
+                                                ResultsBuilder.createBuffer());
     return RespBuilder.createResponse();
   }
 
@@ -1929,6 +1947,8 @@ public:
   void failed(StringRef ErrDescription) override;
 
   void setCompletionKind(UIdent kind) override;
+  void setReusingASTContext(bool flag) override;
+  void setAnnotatedTypename(bool flag) override;
   bool handleResult(const CodeCompletionInfo &Info) override;
 };
 } // end anonymous namespace
@@ -1960,6 +1980,16 @@ void SKCodeCompletionConsumer::setCompletionKind(UIdent kind) {
   RespBuilder.getDictionary().set(KeyKind, kind);
 }
 
+void SKCodeCompletionConsumer::setReusingASTContext(bool flag) {
+  if (flag)
+    RespBuilder.getDictionary().setBool(KeyReusingASTContext, flag);
+}
+
+void SKCodeCompletionConsumer::setAnnotatedTypename(bool flag) {
+  if (flag)
+    RespBuilder.getDictionary().setBool(KeyAnnotatedTypename, flag);
+}
+
 bool SKCodeCompletionConsumer::handleResult(const CodeCompletionInfo &R) {
   Optional<StringRef> ModuleNameOpt;
   if (!R.ModuleName.empty())
@@ -1984,6 +2014,7 @@ bool SKCodeCompletionConsumer::handleResult(const CodeCompletionInfo &R) {
                      R.SemanticContext,
                      R.TypeRelation,
                      R.NotRecommended,
+                     R.IsSystem,
                      R.NumBytesToErase);
   return true;
 }
@@ -2016,6 +2047,8 @@ public:
   void startGroup(UIdent kind, StringRef name) override;
   void endGroup() override;
   void setNextRequestStart(unsigned offset) override;
+  void setReusingASTContext(bool flag) override;
+  void setAnnotatedTypename(bool flag) override;
 };
 } // end anonymous namespace
 
@@ -2158,6 +2191,8 @@ bool SKGroupedCodeCompletionConsumer::handleResult(const CodeCompletionInfo &R) 
     result.set(KeyModuleImportDepth, *R.ModuleImportDepth);
   if (R.NotRecommended)
     result.set(KeyNotRecommended, R.NotRecommended);
+  if (R.IsSystem)
+    result.set(KeyIsSystem, R.IsSystem);
   result.set(KeyNumBytesToErase, R.NumBytesToErase);
 
   if (R.descriptionStructure) {
@@ -2212,6 +2247,14 @@ void SKGroupedCodeCompletionConsumer::endGroup() {
 void SKGroupedCodeCompletionConsumer::setNextRequestStart(unsigned offset) {
   assert(!Response.isNull());
   Response.set(KeyNextRequestStart, offset);
+}
+void SKGroupedCodeCompletionConsumer::setReusingASTContext(bool flag) {
+  if (flag)
+    RespBuilder.getDictionary().setBool(KeyReusingASTContext, flag);
+}
+void SKGroupedCodeCompletionConsumer::setAnnotatedTypename(bool flag) {
+  if (flag)
+    RespBuilder.getDictionary().setBool(KeyAnnotatedTypename, flag);
 }
 
 //===----------------------------------------------------------------------===//
@@ -2548,18 +2591,13 @@ sourcekitd_response_t SKEditorConsumer::createResponse() {
     return Error;
 
   if (Opts.EnableSyntaxMap) {
-    Dict.setCustomBuffer(KeySyntaxMap,
-        CustomBufferKind::TokenAnnotationsArray,
-        SyntaxMap.createBuffer());
+    Dict.setCustomBuffer(KeySyntaxMap, SyntaxMap.createBuffer());
   }
   if (!SemanticAnnotations.empty()) {
-    Dict.setCustomBuffer(KeyAnnotations,
-        CustomBufferKind::TokenAnnotationsArray,
-        SemanticAnnotations.createBuffer());
+    Dict.setCustomBuffer(KeyAnnotations, SemanticAnnotations.createBuffer());
   }
   if (Opts.EnableStructure) {
-    Dict.setCustomBuffer(KeySubStructure, CustomBufferKind::DocStructureArray,
-                         DocStructure.createBuffer());
+    Dict.setCustomBuffer(KeySubStructure, DocStructure.createBuffer());
   }
 
 
@@ -2746,11 +2784,13 @@ void serializeSyntaxTreeAsByteTree(
                                          *SyntaxTree.getRaw(), UserInfo);
 
   std::unique_ptr<llvm::WritableMemoryBuffer> Buf =
-      llvm::WritableMemoryBuffer::getNewUninitMemBuffer(Stream.data().size());
-  memcpy(Buf->getBufferStart(), Stream.data().data(), Stream.data().size());
+      llvm::WritableMemoryBuffer::getNewUninitMemBuffer(sizeof(uint64_t) + Stream.data().size());
+  *reinterpret_cast<uint64_t*>(Buf->getBufferStart()) =
+      (uint64_t)CustomBufferKind::RawData;
+  memcpy(Buf->getBufferStart() + sizeof(uint64_t),
+         Stream.data().data(), Stream.data().size());
 
-  Dict.setCustomBuffer(KeySerializedSyntaxTree, CustomBufferKind::RawData,
-                       std::move(Buf));
+  Dict.setCustomBuffer(KeySerializedSyntaxTree, std::move(Buf));
 
   auto EndClock = clock();
   LOG_SECTION("incrParse Performance", InfoLowPrio) {

@@ -231,12 +231,6 @@ protected:
     CS.filterSolutions(solutions, minimize);
   }
 
-  /// Check whether constraint solver is running in "debug" mode,
-  /// which should output diagnostic information.
-  bool isDebugMode() const {
-    return CS.getASTContext().TypeCheckerOpts.DebugConstraintSolver;
-  }
-
   llvm::raw_ostream &getDebugLogger(bool indent = true) const {
     auto &log = CS.getASTContext().TypeCheckerDebug->getStream();
     return indent ? log.indent(CS.solverState->depth * 2) : log;
@@ -471,7 +465,7 @@ private:
     if (IsSingle)
       return;
 
-    if (isDebugMode())
+    if (CS.isDebugMode())
       getDebugLogger() << "(solving component #" << Index << '\n';
 
     ComponentScope = std::make_unique<Scope>(*this);
@@ -515,7 +509,7 @@ public:
       if (shouldStopAt(*choice))
         break;
 
-      if (isDebugMode()) {
+      if (CS.isDebugMode()) {
         auto &log = getDebugLogger();
         log << "(attempting ";
         choice->print(log, &CS.getASTContext().SourceMgr);
@@ -530,7 +524,7 @@ public:
         }
       }
 
-      if (isDebugMode())
+      if (CS.isDebugMode())
         getDebugLogger() << ")\n";
 
       // If this binding didn't match, let's check if we've attempted
@@ -619,6 +613,13 @@ protected:
   /// Check whether attempting type variable binding choices should
   /// be stopped, because optimal solution has already been found.
   bool shouldStopAt(const TypeVariableBinding &choice) const override {
+    // Let's always attempt default types inferred from literals in diagnostic
+    // mode because that could lead to better diagnostics if the problem is
+    // contextual like argument/parameter conversion or collection element
+    // mismatch.
+    if (CS.shouldAttemptFixes())
+      return false;
+
     // If we were able to solve this without considering
     // default literals, don't bother looking at default literals.
     return AnySolved && choice.hasDefaultedProtocol() &&
@@ -626,6 +627,11 @@ protected:
   }
 
   bool shouldStopAfter(const TypeVariableBinding &choice) const override {
+    // Let's always attempt additional bindings in diagnostic mode, as that
+    // could lead to better diagnostic for e.g trying the unwrapped type.
+    if (CS.shouldAttemptFixes())
+      return false;
+
     // If there has been at least one solution so far
     // at a current batch of bindings is done it's a
     // success because each new batch would be less

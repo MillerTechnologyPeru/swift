@@ -48,7 +48,7 @@ void swift::printDeclDescription(llvm::raw_ostream &out, const Decl *D,
   bool hasPrintedName = false;
   if (auto *named = dyn_cast<ValueDecl>(D)) {
     if (named->hasName()) {
-      out << '\'' << named->getFullName() << '\'';
+      out << '\'' << named->getName() << '\'';
       hasPrintedName = true;
     } else if (auto *accessor = dyn_cast<AccessorDecl>(named)) {
       auto ASD = accessor->getStorage();
@@ -80,7 +80,7 @@ void swift::printDeclDescription(llvm::raw_ostream &out, const Decl *D,
           break;
         }
 
-        out << " for " << ASD->getFullName();
+        out << " for " << ASD->getName();
         hasPrintedName = true;
         loc = ASD->getStartLoc();
       }
@@ -287,4 +287,11 @@ void swift::printDifferentiabilityWitnessDescription(
   key.second.print(out);
   if (addNewline)
     out << '\n';
+}
+
+void PrettyStackTraceDeclContext::print(llvm::raw_ostream &out) const {
+  out << "While " << Action << " in decl context:\n";
+  out << "    ---\n";
+  DC->printContext(out, /*indent=*/4);
+  out << "    ---\n";
 }

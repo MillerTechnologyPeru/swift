@@ -284,8 +284,8 @@ bool SILPerformanceInliner::isProfitableToInline(
 
     // Don't inline class methods.
     if (Callee->hasSelfParam()) {
-      auto SelfTy = Callee->getLoweredFunctionType()
-                          ->getSelfInstanceType(FuncBuilder.getModule());
+      auto SelfTy = Callee->getLoweredFunctionType()->getSelfInstanceType(
+          FuncBuilder.getModule(), AI.getFunction()->getTypeExpansionContext());
       if (SelfTy->mayHaveSuperclass() &&
           Callee->getRepresentation() == SILFunctionTypeRepresentation::Method)
         isClassMethodAtOsize = true;
@@ -915,7 +915,9 @@ bool SILPerformanceInliner::inlineCallsIntoFunction(SILFunction *Caller) {
     return false;
 
   // Second step: do the actual inlining.
-  for (auto AI : AppliesToInline) {
+  // We inline in reverse order, because for very large blocks with many applies
+  // to inline, splitting the block at every apply would be quadratic.
+  for (auto AI : llvm::reverse(AppliesToInline)) {
     SILFunction *Callee = AI.getReferencedFunctionOrNull();
     assert(Callee && "apply_inst does not have a direct callee anymore");
 

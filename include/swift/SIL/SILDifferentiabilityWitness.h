@@ -113,6 +113,7 @@ public:
     case AutoDiffDerivativeFunctionKind::VJP:
       return VJP;
     }
+    llvm_unreachable("invalid derivative type");
   }
   void setJVP(SILFunction *jvp) { JVP = jvp; }
   void setVJP(SILFunction *vjp) { VJP = vjp; }
@@ -131,6 +132,11 @@ public:
   bool isDefinition() const { return !IsDeclaration; }
   bool isSerialized() const { return IsSerialized; }
   const DeclAttribute *getAttribute() const { return Attribute; }
+
+  /// Returns the `SILAutoDiffIndices` corresponding to this config's indices.
+  // TODO(TF-893): This is a temporary shim for incremental removal of
+  // `SILAutoDiffIndices`. Eventually remove this.
+  SILAutoDiffIndices getSILAutoDiffIndices() const;
 
   /// Verify that the differentiability witness is well-formed.
   void verify(const SILModule &module) const;

@@ -764,3 +764,63 @@ func test_infinite_self_recursion() {
   _ = Recurse<Int>().foo
   // expected-error@-1 {{value of type 'Recurse<Int>' has no dynamic member 'foo' using key path from root type 'Recurse<Int>'}}
 }
+
+// rdar://problem/60225883 - crash during solution application (ExprRewritter::buildKeyPathDynamicMemberIndexExpr)
+func test_combination_of_keypath_and_string_lookups() {
+  @dynamicMemberLookup
+  struct Outer {
+    subscript(dynamicMember member: String) -> Outer {
+      Outer()
+    }
+
+    subscript(dynamicMember member: KeyPath<Inner, Inner>) -> Outer {
+      Outer()
+    }
+  }
+
+  @dynamicMemberLookup
+  struct Inner {
+    subscript(dynamicMember member: String) -> Inner {
+      Inner()
+    }
+  }
+
+  func test(outer: Outer) {
+    _ = outer.hello.world // Ok
+  }
+}
+
+// SR-12626
+@dynamicMemberLookup
+struct SR12626 {
+  var i: Int
+
+  subscript(dynamicMember member: KeyPath<SR12626, Int>) -> Int {
+    get { self[keyPath: member] }
+    set { self[keyPath: member] = newValue } // expected-error {{cannot assign through subscript: 'member' is a read-only key path}}
+  }
+}
+
+// SR-12245
+public struct SR12425_S {}
+
+@dynamicMemberLookup
+public struct SR12425_R {}
+
+internal var rightStructInstance: SR12425_R = SR12425_R()
+
+public extension SR12425_R {
+  subscript<T>(dynamicMember member: WritableKeyPath<SR12425_S, T>) -> T {
+      get { rightStructInstance[keyPath: member] } // expected-error {{key path with root type 'SR12425_S' cannot be applied to a base of type 'SR12425_R'}}
+      set { rightStructInstance[keyPath: member] = newValue } // expected-error {{key path with root type 'SR12425_S' cannot be applied to a base of type 'SR12425_R'}}
+  }
+}
+
+@dynamicMemberLookup
+public struct SR12425_R1 {}
+
+public extension SR12425_R1 {
+  subscript<T>(dynamicMember member: KeyPath<SR12425_R1, T>) -> T {
+    get { rightStructInstance[keyPath: member] } // expected-error {{key path with root type 'SR12425_R1' cannot be applied to a base of type 'SR12425_R'}}
+  }
+}

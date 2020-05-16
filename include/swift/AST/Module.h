@@ -59,6 +59,7 @@ namespace swift {
   class FuncDecl;
   class InfixOperatorDecl;
   class LinkLibrary;
+  struct ImplicitImport;
   class ModuleLoader;
   class NominalTypeDecl;
   class EnumElementDecl;
@@ -95,6 +96,8 @@ enum class FileUnitKind {
   Builtin,
   /// A serialized Swift AST.
   SerializedAST,
+  /// A synthesized file.
+  Synthesized,
   /// An imported Clang module.
   ClangModule,
   /// A Clang module imported from DWARF.
@@ -104,7 +107,6 @@ enum class FileUnitKind {
 enum class SourceFileKind {
   Library,  ///< A normal .swift file.
   Main,     ///< A .swift file that can have top-level code.
-  REPL,     ///< A virtual file that holds the user's input in the REPL.
   SIL,      ///< Came from a .sil file.
   Interface ///< Came from a .swiftinterface file, representing another module.
 };
@@ -156,6 +158,42 @@ enum class ResilienceStrategy : unsigned {
   Resilient
 };
 
+/// The kind of stdlib that should be imported.
+enum class ImplicitStdlibKind {
+  /// No standard library should be implicitly imported.
+  None,
+
+  /// The Builtin module should be implicitly imported.
+  Builtin,
+
+  /// The regular Swift standard library should be implicitly imported.
+  Stdlib
+};
+
+struct ImplicitImportInfo {
+  /// The implicit stdlib to import.
+  ImplicitStdlibKind StdlibKind;
+
+  /// Whether we should attempt to import an underlying Clang half of this
+  /// module.
+  bool ShouldImportUnderlyingModule;
+
+  /// The bridging header path for this module, empty if there is none.
+  StringRef BridgingHeaderPath;
+
+  /// The names of additional modules to be implicitly imported.
+  SmallVector<Identifier, 4> ModuleNames;
+
+  /// An additional list of already-loaded modules which should be implicitly
+  /// imported.
+  SmallVector<std::pair<ModuleDecl *, /*exported*/ bool>, 4>
+      AdditionalModules;
+
+  ImplicitImportInfo()
+      : StdlibKind(ImplicitStdlibKind::None),
+        ShouldImportUnderlyingModule(false) {}
+};
+
 class OverlayFile;
 
 /// The minimum unit of compilation.
@@ -165,28 +203,51 @@ class OverlayFile;
 ///
 /// \sa FileUnit
 class ModuleDecl : public DeclContext, public TypeDecl {
+  friend class DirectOperatorLookupRequest;
+  friend class DirectPrecedenceGroupLookupRequest;
+
 public:
   typedef ArrayRef<Located<Identifier>> AccessPathTy;
-  typedef std::pair<ModuleDecl::AccessPathTy, ModuleDecl*> ImportedModule;
-  
+  /// Convenience struct to keep track of a module along with its access path.
+  struct ImportedModule {
+    /// The access path from an import: `import Foo.Bar` -> `Foo.Bar`.
+    ModuleDecl::AccessPathTy accessPath;
+    /// The actual module corresponding to the import.
+    ///
+    /// Invariant: The pointer is non-null.
+    ModuleDecl *importedModule;
+
+    ImportedModule(ModuleDecl::AccessPathTy accessPath,
+                   ModuleDecl *importedModule)
+        : accessPath(accessPath), importedModule(importedModule) {
+      assert(this->importedModule);
+    }
+
+    bool operator==(const ModuleDecl::ImportedModule &other) const {
+      return (this->importedModule == other.importedModule) &&
+             (this->accessPath == other.accessPath);
+    }
+  };
+
   static bool matchesAccessPath(AccessPathTy AccessPath, DeclName Name) {
     assert(AccessPath.size() <= 1 && "can only refer to top-level decls");
   
     return AccessPath.empty()
       || DeclName(AccessPath.front().Item).matchesRef(Name);
   }
-  
+
   /// Arbitrarily orders ImportedModule records, for inclusion in sets and such.
   class OrderImportedModules {
   public:
     bool operator()(const ImportedModule &lhs,
                     const ImportedModule &rhs) const {
-      if (lhs.second != rhs.second)
-        return std::less<const ModuleDecl *>()(lhs.second, rhs.second);
-      if (lhs.first.data() != rhs.first.data())
-        return std::less<AccessPathTy::iterator>()(lhs.first.begin(),
-                                                   rhs.first.begin());
-      return lhs.first.size() < rhs.first.size();
+      if (lhs.importedModule != rhs.importedModule)
+        return std::less<const ModuleDecl *>()(lhs.importedModule,
+                                               rhs.importedModule);
+      if (lhs.accessPath.data() != rhs.accessPath.data())
+        return std::less<AccessPathTy::iterator>()(lhs.accessPath.begin(),
+                                                   rhs.accessPath.begin());
+      return lhs.accessPath.size() < rhs.accessPath.size();
     }
   };
 
@@ -240,6 +301,10 @@ private:
   llvm::SmallDenseMap<Identifier, SmallVector<OverlayFile *, 1>>
     declaredCrossImports;
 
+  /// A description of what should be implicitly imported by each file of this
+  /// module.
+  const ImplicitImportInfo ImportInfo;
+
   std::unique_ptr<SourceLookupCache> Cache;
   SourceLookupCache &getSourceLookupCache() const;
 
@@ -269,14 +334,35 @@ private:
   /// \see EntryPointInfoTy
   EntryPointInfoTy EntryPointInfo;
 
-  ModuleDecl(Identifier name, ASTContext &ctx);
+  ModuleDecl(Identifier name, ASTContext &ctx, ImplicitImportInfo importInfo);
 
 public:
-  static ModuleDecl *create(Identifier name, ASTContext &ctx) {
-    return new (ctx) ModuleDecl(name, ctx);
+  /// Creates a new module with a given \p name.
+  ///
+  /// \param importInfo Information about which modules should be implicitly
+  /// imported by each file of this module.
+  static ModuleDecl *
+  create(Identifier name, ASTContext &ctx,
+         ImplicitImportInfo importInfo = ImplicitImportInfo()) {
+    return new (ctx) ModuleDecl(name, ctx, importInfo);
+  }
+
+  static ModuleDecl *
+  createMainModule(ASTContext &ctx, Identifier name, ImplicitImportInfo iinfo) {
+    auto *Mod = ModuleDecl::create(name, ctx, iinfo);
+    Mod->Bits.ModuleDecl.IsMainModule = true;
+    return Mod;
   }
 
   using Decl::getASTContext;
+
+  /// Retrieves information about which modules are implicitly imported by
+  /// each file of this module.
+  const ImplicitImportInfo &getImplicitImportInfo() const { return ImportInfo; }
+
+  /// Retrieve a list of modules that each file of this module implicitly
+  /// imports.
+  ArrayRef<ImplicitImport> getImplicitImports() const;
 
   ArrayRef<FileUnit *> getFiles() {
     return Files;
@@ -334,6 +420,52 @@ public:
   /// Get the list of all modules this module declares a cross-import with.
   void getDeclaredCrossImportBystanders(
       SmallVectorImpl<Identifier> &bystanderNames);
+
+private:
+  /// A cache of this module's underlying module and required bystander if it's
+  /// an underscored cross-import overlay.
+  Optional<std::pair<ModuleDecl *, Identifier>> declaringModuleAndBystander;
+
+  /// If this module is an underscored cross import overlay, gets the underlying
+  /// module that declared it (which may itself be a cross-import overlay),
+  /// along with the name of the required bystander module. Used by tooling to
+  /// present overlays as if they were part of their underlying module.
+  std::pair<ModuleDecl *, Identifier> getDeclaringModuleAndBystander();
+
+  ///  If this is a traditional (non-cross-import) overlay, get its underlying
+  ///  module if one exists.
+  ModuleDecl *getUnderlyingModuleIfOverlay() const;
+
+public:
+
+  /// Returns true if this module is an underscored cross import overlay
+  /// declared by \p other or its underlying clang module, either directly or
+  /// transitively (via intermediate cross-import overlays - for cross-imports
+  /// involving more than two modules).
+  bool isCrossImportOverlayOf(ModuleDecl *other);
+
+  /// If this module is an underscored cross-import overlay, returns the
+  /// non-underscored underlying module that declares it as an overlay, either
+  /// directly or transitively (via intermediate cross-import overlays - for
+  /// cross-imports involving more than two modules).
+  ModuleDecl *getDeclaringModuleIfCrossImportOverlay();
+
+  /// If this module is an underscored cross-import overlay of \p declaring or
+  /// its underlying clang module, either directly or transitively, populates
+  /// \p bystanderNames with the set of bystander modules that must be present
+  /// alongside \p declaring for the overlay to be imported and returns true.
+  /// Returns false otherwise.
+  bool getRequiredBystandersIfCrossImportOverlay(
+      ModuleDecl *declaring, SmallVectorImpl<Identifier> &bystanderNames);
+
+
+  /// Walks and loads the declared, underscored cross-import overlays of this
+  /// module and its underlying clang module, transitively, to find all cross
+  /// import overlays this module underlies.
+  ///
+  /// This is used by tooling to present these overlays as part of this module.
+  void findDeclaredCrossImportOverlaysTransitive(
+      SmallVectorImpl<ModuleDecl *> &overlays);
 
   /// Convenience accessor for clients that know what kind of file they're
   /// dealing with.
@@ -417,10 +549,14 @@ public:
     Bits.ModuleDecl.IsNonSwiftModule = flag;
   }
 
+  bool isMainModule() const {
+    return Bits.ModuleDecl.IsMainModule;
+  }
+
   /// Retrieve the top-level module. If this module is already top-level, this
   /// returns itself. If this is a submodule such as \c Foo.Bar.Baz, this
   /// returns the module \c Foo.
-  ModuleDecl *getTopLevelModule();
+  ModuleDecl *getTopLevelModule(bool overlay = false);
 
   bool isResilient() const {
     return getResilienceStrategy() != ResilienceStrategy::Default;
@@ -595,6 +731,12 @@ public:
   /// The order of the results is not guaranteed to be meaningful.
   void getLocalTypeDecls(SmallVectorImpl<TypeDecl*> &Results) const;
 
+  /// Finds all operator decls of this module.
+  ///
+  /// This does a simple local lookup, not recursively looking through imports.
+  /// The order of the results is not guaranteed to be meaningful.
+  void getOperatorDecls(SmallVectorImpl<OperatorDecl *> &results) const;
+
   /// Finds all precedence group decls of this module.
   ///
   /// This does a simple local lookup, not recursively looking through imports.
@@ -748,14 +890,14 @@ namespace llvm {
     }
 
     static unsigned getHashValue(const ModuleDecl::ImportedModule &val) {
-      auto pair = std::make_pair(val.first.size(), val.second);
+      auto pair = std::make_pair(val.accessPath.size(), val.importedModule);
       return llvm::DenseMapInfo<decltype(pair)>::getHashValue(pair);
     }
 
     static bool isEqual(const ModuleDecl::ImportedModule &lhs,
                         const ModuleDecl::ImportedModule &rhs) {
-      return lhs.second == rhs.second &&
-             ModuleDecl::isSameAccessPath(lhs.first, rhs.first);
+      return lhs.importedModule == rhs.importedModule &&
+             ModuleDecl::isSameAccessPath(lhs.accessPath, rhs.accessPath);
     }
   };
 }

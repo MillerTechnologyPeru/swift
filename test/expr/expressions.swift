@@ -162,7 +162,7 @@ func errorRecovery() {
 }
 
 func acceptsInt(_ x: Int) {}
-acceptsInt(unknown_var) // expected-error {{use of unresolved identifier 'unknown_var'}}
+acceptsInt(unknown_var) // expected-error {{cannot find 'unknown_var' in scope}}
 
 
 
@@ -173,7 +173,7 @@ var test1d = { { { 42 } } }
 
 func test2(_ a: Int, b: Int) -> (c: Int) { // expected-error{{cannot create a single-element tuple with an element label}} {{34-37=}} expected-note {{did you mean 'a'?}} expected-note {{did you mean 'b'?}}
  _ = a+b
- a+b+c // expected-error{{use of unresolved identifier 'c'}}
+ a+b+c // expected-error{{cannot find 'c' in scope}}
  return a+b
 }
 
@@ -709,7 +709,6 @@ func test() {
 func unusedExpressionResults() {
   // Unused l-value
   _ // expected-error{{'_' can only appear in a pattern or on the left side of an assignment}}
-  // expected-error@-1 {{expression resolves to an unused variable}}
 
   // <rdar://problem/20749592> Conditional Optional binding hides compiler error
   let optionalc:C? = nil

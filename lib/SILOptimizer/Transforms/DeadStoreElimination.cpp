@@ -161,6 +161,8 @@ static bool isDeadStoreInertInstruction(SILInstruction *Inst) {
   case SILInstructionKind::DeallocRefInst:
   case SILInstructionKind::CondFailInst:
   case SILInstructionKind::FixLifetimeInst:
+  case SILInstructionKind::EndAccessInst:
+  case SILInstructionKind::SetDeallocatingInst:
     return true;
   default:
     return false;
@@ -1201,7 +1203,7 @@ bool DSEContext::run() {
     return false;
 
   // Do we run a pessimistic data flow ?
-  bool Optimistic = Kind == ProcessKind::ProcessOptimistic ? true : false;
+  const bool Optimistic = (Kind == ProcessKind::ProcessOptimistic);
 
   // For all basic blocks in the function, initialize a BB state.
   //

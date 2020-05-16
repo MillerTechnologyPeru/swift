@@ -135,14 +135,6 @@ def driver_always_rebuild_dependents :
   Flag<["-"], "driver-always-rebuild-dependents">, InternalDebugOpt,
   HelpText<"Always rebuild dependents of files that have been modified">;
 
-def enable_fine_grained_dependencies :
-Flag<["-"], "enable-fine-grained-dependencies">, Flags<[FrontendOption, HelpHidden]>,
-HelpText<"Be more selective about incremental recompilation">;
-
-def disable_fine_grained_dependencies :
-Flag<["-"], "disable-fine-grained-dependencies">, Flags<[FrontendOption, HelpHidden]>,
-HelpText<"Don't be more selective about incremental recompilation">;
-
 def enable_type_fingerprints :
 Flag<["-"], "enable-type-fingerprints">, Flags<[FrontendOption, HelpHidden]>,
 HelpText<"Enable per-nominal and extension body fingerprints">;
@@ -338,6 +330,9 @@ def emit_loaded_module_trace_path : Separate<["-"], "emit-loaded-module-trace-pa
 def emit_loaded_module_trace_path_EQ : Joined<["-"], "emit-loaded-module-trace-path=">,
   Flags<[FrontendOption, NoInteractiveOption, ArgumentIsPath]>,
   Alias<emit_loaded_module_trace_path>;
+def emit_cross_import_remarks : Flag<["-"], "Rcross-import">,
+  Flags<[FrontendOption, DoesNotAffectIncrementalBuild]>,
+  HelpText<"Emit a remark if a cross-import of a module is triggered.">;
 
 def emit_tbd : Flag<["-"], "emit-tbd">,
   HelpText<"Emit a TBD file">,
@@ -372,6 +367,9 @@ def no_color_diagnostics : Flag<["-"], "no-color-diagnostics">,
 def debug_diagnostic_names : Flag<["-"], "debug-diagnostic-names">,
   Flags<[FrontendOption, DoesNotAffectIncrementalBuild, HelpHidden]>,
   HelpText<"Include diagnostic names when printing">;
+def print_educational_notes : Flag<["-"], "print-educational-notes">,
+  Flags<[FrontendOption, DoesNotAffectIncrementalBuild]>,
+  HelpText<"Include educational notes in printed diagnostic output, if available">;
 
 def module_cache_path : Separate<["-"], "module-cache-path">,
   Flags<[FrontendOption, DoesNotAffectIncrementalBuild, ArgumentIsPath]>,
@@ -495,14 +493,29 @@ def disable_bridging_pch : Flag<["-"], "disable-bridging-pch">,
   HelpText<"Disable automatic generation of bridging PCH files">;
 
 // Experimental feature options
-def enable_experimental_differentiable_programming : Flag<["-"], "enable-experimental-differentiable-programming">,
+
+// Note: this flag will be removed when JVP/differential generation in the
+// differentiation transform is robust.
+def enable_experimental_forward_mode_differentiation :
+  Flag<["-"], "enable-experimental-forward-mode-differentiation">,
   Flags<[FrontendOption]>,
-  HelpText<"Enable experimental differentiable programming features">;
+  HelpText<"Enable experimental forward mode differentiation">;
+
+def enable_experimental_additive_arithmetic_derivation :
+  Flag<["-"], "enable-experimental-additive-arithmetic-derivation">,
+  Flags<[FrontendOption]>,
+  HelpText<"Enable experimental 'AdditiveArithmetic' derived conformances">;
 
 def enable_experimental_concise_pound_file : Flag<["-"],
     "enable-experimental-concise-pound-file">,
   Flags<[FrontendOption]>,
   HelpText<"Enable experimental concise '#file' identifier">;
+
+def experimental_private_intransitive_dependencies : Flag<["-"],
+    "experimental-private-intransitive-dependencies">,
+  Flags<[FrontendOption, HelpHidden]>,
+  HelpText<"Enable experimental dependency tracking that never cascades">;
+
 
 // Diagnostic control options
 def suppress_warnings : Flag<["-"], "suppress-warnings">,
@@ -512,6 +525,10 @@ def suppress_warnings : Flag<["-"], "suppress-warnings">,
 def warnings_as_errors : Flag<["-"], "warnings-as-errors">,
   Flags<[FrontendOption]>,
   HelpText<"Treat warnings as errors">;
+
+def no_warnings_as_errors : Flag<["-"], "no-warnings-as-errors">,
+  Flags<[FrontendOption]>,
+  HelpText<"Don't treat warnings as errors">;
 
 def continue_building_after_errors : Flag<["-"], "continue-building-after-errors">,
   Flags<[FrontendOption, DoesNotAffectIncrementalBuild]>,
@@ -1012,6 +1029,10 @@ def sanitize_coverage_EQ : CommaJoined<["-"], "sanitize-coverage=">,
   HelpText<"Specify the type of coverage instrumentation for Sanitizers and"
   " additional options separated by commas">;
 
+def scan_dependencies : Flag<["-"], "scan-dependencies">,
+  HelpText<"Scan dependencies of the given Swift sources">, ModeOpt,
+  Flags<[FrontendOption, NoInteractiveOption, DoesNotAffectIncrementalBuild]>;
+
 def enable_astscope_lookup : Flag<["-"], "enable-astscope-lookup">,
   Flags<[FrontendOption]>,
   HelpText<"Enable ASTScope-based unqualified name lookup">;
@@ -1023,6 +1044,16 @@ def disable_astscope_lookup : Flag<["-"], "disable-astscope-lookup">,
 def disable_parser_lookup : Flag<["-"], "disable-parser-lookup">,
   Flags<[FrontendOption]>,
   HelpText<"Disable parser lookup & use ast scope lookup only (experimental)">;
+
+def enable_request_based_incremental_dependencies : Flag<["-"],
+  "enable-request-based-incremental-dependencies">,
+  Flags<[FrontendOption]>,
+  HelpText<"Enable request-based name tracking">;
+
+def disable_request_based_incremental_dependencies : Flag<["-"],
+  "disable-request-based-incremental-dependencies">,
+  Flags<[FrontendOption]>,
+  HelpText<"Disable request-based name tracking">;
 
 def index_file : Flag<["-"], "index-file">,
   HelpText<"Produce index data for a source file">, ModeOpt,

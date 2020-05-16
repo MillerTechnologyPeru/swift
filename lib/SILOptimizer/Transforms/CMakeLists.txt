@@ -17,6 +17,7 @@ silopt_register_sources(
   DeadStoreElimination.cpp
   DestroyHoisting.cpp
   Devirtualizer.cpp
+  DifferentiabilityWitnessDevirtualizer.cpp
   GenericSpecializer.cpp
   MergeCondFail.cpp
   Outliner.cpp
@@ -24,6 +25,7 @@ silopt_register_sources(
   PerformanceInliner.cpp
   RedundantLoadElimination.cpp
   RedundantOverflowCheckRemoval.cpp
+  RedundantPhiElimination.cpp
   ReleaseDevirtualizer.cpp
   SemanticARCOpts.cpp
   SILCodeMotion.cpp

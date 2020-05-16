@@ -81,7 +81,7 @@ const clang::Decl *
 importer::getFirstNonLocalDecl(const clang::Decl *D) {
   D = D->getCanonicalDecl();
   auto iter = llvm::find_if(D->redecls(), [](const clang::Decl *next) -> bool {
-    return !next->isLexicallyWithinFunctionOrMethod();
+    return !next->isInLocalScope();
   });
   if (iter == D->redecls_end())
     return nullptr;
@@ -446,6 +446,8 @@ OmissionTypeName importer::getClangTypeNameForOmission(clang::ASTContext &ctx,
 
     // OpenMP types that don't have Swift equivalents.
     case clang::BuiltinType::OMPArraySection:
+    case clang::BuiltinType::OMPArrayShaping:
+    case clang::BuiltinType::OMPIterator:
       return OmissionTypeName();
 
     // SVE builtin types that don't have Swift equivalents.

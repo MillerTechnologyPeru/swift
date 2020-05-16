@@ -195,9 +195,9 @@ func testKeyPath(sub: Sub, optSub: OptSub,
 
   let _: AnyKeyPath = \A.property
   let _: AnyKeyPath = \C<A>.value
-  let _: AnyKeyPath = \.property // expected-error{{ambiguous}}
+  let _: AnyKeyPath = \.property // expected-error {{'AnyKeyPath' does not provide enough context for root type to be inferred; consider explicitly specifying a root type}} {{24-24=<#Root#>}}
   let _: AnyKeyPath = \C.value // expected-error{{generic parameter 'T' could not be inferred}}
-  let _: AnyKeyPath = \.value // expected-error{{ambiguous}}
+  let _: AnyKeyPath = \.value // expected-error {{'AnyKeyPath' does not provide enough context for root type to be inferred; consider explicitly specifying a root type}} {{24-24=<#Root#>}}
 
   let _ = \Prop.[nonHashableSub] // expected-error{{subscript index of type 'NonHashableSub' in a key path must be Hashable}}
   let _ = \Prop.[sub, sub]
@@ -811,6 +811,16 @@ func test_keypath_with_method_refs() {
   let _ = \A.Type.faz.bar // expected-error {{key path cannot refer to static method 'faz()'}}
 }
 
+// SR-12519: Compiler crash on invalid method reference in key path.
+protocol Zonk {
+  func wargle()
+}
+typealias Blatz = (gloop: String, zoop: Zonk?)
+
+func sr12519(fleep: [Blatz]) {
+  fleep.compactMap(\.zoop?.wargle) // expected-error {{key path cannot refer to instance method 'wargle()'}}
+}
+
 // SR-10467 - Argument type 'KeyPath<String, Int>' does not conform to expected type 'Any'
 func test_keypath_in_any_context() {
   func foo(_: Any) {}
@@ -862,6 +872,34 @@ func sr11562() {
 
   _ = \S4.[1, 4] // expected-error {{subscript expects a single parameter of type '(Int, Int)'}} {{12-12=(}} {{16-16=)}}
   // expected-error@-1 {{subscript index of type '(Int, Int)' in a key path must be Hashable}}
+}
+
+// SR-12290: Ban keypaths with contextual root and without a leading dot
+struct SR_12290 {
+  let property: [Int] = []
+  let kp1: KeyPath<SR_12290, Int> = \property.count // expected-error {{a Swift key path with contextual root must begin with a leading dot}}{{38-38=.}}
+  let kp2: KeyPath<SR_12290, Int> = \.property.count // Ok
+  let kp3: KeyPath<SR_12290, Int> = \SR_12290.property.count // Ok
+
+  func foo1(_: KeyPath<SR_12290, Int> = \property.count) {} // expected-error {{a Swift key path with contextual root must begin with a leading dot}}{{42-42=.}}
+  func foo2(_: KeyPath<SR_12290, Int> = \.property.count) {} // Ok
+  func foo3(_: KeyPath<SR_12290, Int> = \SR_12290.property.count) {} // Ok
+
+  func foo4<T>(_: KeyPath<SR_12290, T>) {}
+  func useFoo4() {
+    foo4(\property.count) // expected-error {{a Swift key path with contextual root must begin with a leading dot}}{{11-11=.}}
+    foo4(\.property.count) // Ok
+    foo4(\SR_12290.property.count) // Ok
+  }
+}
+
+func testKeyPathHole() {
+  _ = \.x // expected-error {{cannot infer key path type from context; consider explicitly specifying a root type}} {{8-8=<#Root#>}}
+  let _ : AnyKeyPath = \.x 
+  // expected-error@-1 {{'AnyKeyPath' does not provide enough context for root type to be inferred; consider explicitly specifying a root type}} {{25-25=<#Root#>}}
+
+  func f(_ i: Int) {}
+  f(\.x) // expected-error {{cannot infer key path type from context; consider explicitly specifying a root type}} {{6-6=<#Root#>}}
 }
 
 func testSyntaxErrors() { // expected-note{{}}

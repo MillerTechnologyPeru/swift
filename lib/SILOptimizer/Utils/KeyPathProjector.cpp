@@ -225,7 +225,8 @@ public:
       auto &function = builder.getFunction();
       auto substType = component.getComponentType().subst(keyPath->getSubstitutions(),
                                                            None);
-      SILType type = function.getLoweredType(substType);
+      SILType type = function.getLoweredType(
+                         Lowering::AbstractionPattern::getOpaque(), substType);
       auto addr = builder.createAllocStack(loc, type);
       
       assertHasNoContext();
@@ -302,7 +303,8 @@ public:
           auto &function = builder.getFunction();
           auto substType = component.getComponentType().subst(keyPath->getSubstitutions(),
                                                                None);
-          SILType type = function.getLoweredType(substType);
+          SILType type = function.getLoweredType(
+                        Lowering::AbstractionPattern::getOpaque(), substType);
           auto addr = builder.createAllocStack(loc, type);
 
           assertHasNoContext();
@@ -351,7 +353,8 @@ public:
       auto &function = builder.getFunction();
       auto substType = component.getComponentType().subst(keyPath->getSubstitutions(),
                                                            None);
-      SILType optType = function.getLoweredType(substType);
+      SILType optType = function.getLoweredType(
+                         Lowering::AbstractionPattern::getOpaque(), substType);
       SILType objType = optType.getOptionalObjectType().getAddressType();
       
       assert(objType && "optional wrap must return an optional");
@@ -557,7 +560,8 @@ public:
       auto resultCanType = components.back().getComponentType();
       auto &function = builder.getFunction();
       auto substType = resultCanType.subst(keyPath->getSubstitutions(), None);
-      auto optType = function.getLoweredType(substType);
+      auto optType = function.getLoweredType(
+                         Lowering::AbstractionPattern::getOpaque(), substType);
       
       assert(optType.getOptionalObjectType() &&
              "Optional-chained key path should result in an optional");
@@ -652,14 +656,19 @@ private:
   }
 };
 
+KeyPathInst *
+KeyPathProjector::getLiteralKeyPath(SILValue keyPath) {
+  if (auto *upCast = dyn_cast<UpcastInst>(keyPath))
+    keyPath = upCast->getOperand();
+  // TODO: Look through other conversions, copies, etc.?
+  return dyn_cast<KeyPathInst>(keyPath);
+}
+
 std::unique_ptr<KeyPathProjector>
 KeyPathProjector::create(SILValue keyPath, SILValue root,
                          SILLocation loc, SILBuilder &builder) {
-  if (auto *upCast = dyn_cast<UpcastInst>(keyPath))
-    keyPath = upCast->getOperand();
-  
   // Is it a keypath instruction at all?
-  auto *kpInst = dyn_cast<KeyPathInst>(keyPath);
+  auto *kpInst = getLiteralKeyPath(keyPath);
   if (!kpInst || !kpInst->hasPattern())
     return nullptr;
   

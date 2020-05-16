@@ -54,31 +54,42 @@ Type DerivedConformance::getProtocolType() const {
 bool DerivedConformance::derivesProtocolConformance(DeclContext *DC,
                                                     NominalTypeDecl *Nominal,
                                                     ProtocolDecl *Protocol) {
-  // Only known protocols can be derived.
-  auto knownProtocol = Protocol->getKnownProtocolKind();
-  if (!knownProtocol)
+  const auto derivableKind = Protocol->getKnownDerivableProtocolKind();
+  if (!derivableKind)
     return false;
 
-  if (*knownProtocol == KnownProtocolKind::Hashable) {
+  // When the necessary requirements are met, the conformance to OptionSet
+  // is serendipitously derived via memberwise initializer synthesis.
+  if (*derivableKind == KnownDerivableProtocolKind::OptionSet) {
+    return false;
+  }
+
+  if (*derivableKind == KnownDerivableProtocolKind::Hashable) {
     // We can always complete a partial Hashable implementation, and we can
     // synthesize a full Hashable implementation for structs and enums with
     // Hashable components.
     return canDeriveHashable(Nominal);
   }
 
+  if (*derivableKind == KnownDerivableProtocolKind::AdditiveArithmetic)
+    return canDeriveAdditiveArithmetic(Nominal, DC);
+
+  if (*derivableKind == KnownDerivableProtocolKind::Differentiable)
+    return canDeriveDifferentiable(Nominal, DC);
+
   if (auto *enumDecl = dyn_cast<EnumDecl>(Nominal)) {
-    switch (*knownProtocol) {
+    switch (*derivableKind) {
         // The presence of a raw type is an explicit declaration that
         // the compiler should derive a RawRepresentable conformance.
-      case KnownProtocolKind::RawRepresentable:
+      case KnownDerivableProtocolKind::RawRepresentable:
         return canDeriveRawRepresentable(DC, Nominal);
 
         // Enums without associated values can implicitly derive Equatable
         // conformance.
-      case KnownProtocolKind::Equatable:
+      case KnownDerivableProtocolKind::Equatable:
         return canDeriveEquatable(DC, Nominal);
       
-      case KnownProtocolKind::Comparable:
+      case KnownDerivableProtocolKind::Comparable:
         return !enumDecl->hasPotentiallyUnavailableCaseValue()
             && canDeriveComparable(DC, enumDecl); 
 
@@ -86,18 +97,18 @@ bool DerivedConformance::derivesProtocolConformance(DeclContext *DC,
         // a CaseIterable conformance.
         //
         // FIXME: Lift the availability restriction.
-      case KnownProtocolKind::CaseIterable:
+      case KnownDerivableProtocolKind::CaseIterable:
         return !enumDecl->hasPotentiallyUnavailableCaseValue()
             && enumDecl->hasOnlyCasesWithoutAssociatedValues();
 
         // @objc enums can explicitly derive their _BridgedNSError conformance.
-      case KnownProtocolKind::BridgedNSError:
+      case KnownDerivableProtocolKind::BridgedNSError:
         return enumDecl->isObjC() && enumDecl->hasCases()
             && enumDecl->hasOnlyCasesWithoutAssociatedValues();
 
         // Enums without associated values and enums with a raw type of String
         // or Int can explicitly derive CodingKey conformance.
-      case KnownProtocolKind::CodingKey: {
+      case KnownDerivableProtocolKind::CodingKey: {
         Type rawType = enumDecl->getRawType();
         if (rawType) {
           auto parentDC = enumDecl->getDeclContext();
@@ -119,8 +130,8 @@ bool DerivedConformance::derivesProtocolConformance(DeclContext *DC,
     // Structs and classes can explicitly derive Encodable and Decodable
     // conformance (explicitly meaning we can synthesize an implementation if
     // a type conforms manually).
-    if (*knownProtocol == KnownProtocolKind::Encodable ||
-        *knownProtocol == KnownProtocolKind::Decodable) {
+    if (*derivableKind == KnownDerivableProtocolKind::Encodable ||
+        *derivableKind == KnownDerivableProtocolKind::Decodable) {
       // FIXME: This is not actually correct. We cannot promise to always
       // provide a witness here for all structs and classes. Unfortunately,
       // figuring out whether this is actually possible requires much more
@@ -134,8 +145,8 @@ bool DerivedConformance::derivesProtocolConformance(DeclContext *DC,
 
     // Structs can explicitly derive Equatable conformance.
     if (isa<StructDecl>(Nominal)) {
-      switch (*knownProtocol) {
-        case KnownProtocolKind::Equatable:
+      switch (*derivableKind) {
+        case KnownDerivableProtocolKind::Equatable:
           return canDeriveEquatable(DC, Nominal);
         default:
           return false;
@@ -168,7 +179,7 @@ ValueDecl *DerivedConformance::getDerivableRequirement(NominalTypeDecl *nominal,
   // Note: whenever you update this function, also update
   // TypeChecker::deriveProtocolRequirement.
   ASTContext &ctx = nominal->getASTContext();
-  auto name = requirement->getFullName();
+  const auto name = requirement->getName();
 
   // Local function that retrieves the requirement with the same name as
   // the provided requirement, but within the given known protocol.
@@ -177,9 +188,8 @@ ValueDecl *DerivedConformance::getDerivableRequirement(NominalTypeDecl *nominal,
     auto proto = ctx.getProtocol(kind);
     if (!proto) return nullptr;
 
-    auto conformance = TypeChecker::conformsToProtocol(
-        nominal->getDeclaredInterfaceType(), proto, nominal,
-        ConformanceCheckFlags::SkipConditionalRequirements);
+    auto conformance = nominal->getParentModule()->lookupConformance(
+        nominal->getDeclaredInterfaceType(), proto);
     if (conformance) {
       auto DC = conformance.getConcrete()->getDeclContext();
       // Check whether this nominal type derives conformances to the protocol.
@@ -217,6 +227,10 @@ ValueDecl *DerivedConformance::getDerivableRequirement(NominalTypeDecl *nominal,
     if (name.isSimpleName(ctx.Id_intValue))
       return getRequirement(KnownProtocolKind::CodingKey);
 
+    // AdditiveArithmetic.zero
+    if (name.isSimpleName(ctx.Id_zero))
+      return getRequirement(KnownProtocolKind::AdditiveArithmetic);
+
     return nullptr;
   }
 
@@ -227,6 +241,20 @@ ValueDecl *DerivedConformance::getDerivableRequirement(NominalTypeDecl *nominal,
     
     if (func->isOperator() && name.getBaseName() == "==")
       return getRequirement(KnownProtocolKind::Equatable);
+
+    // AdditiveArithmetic.+
+    // AdditiveArithmetic.-
+    if (func->isOperator() && name.getArgumentNames().size() == 2 &&
+        (name.getBaseName() == "+" || name.getBaseName() == "-")) {
+      return getRequirement(KnownProtocolKind::AdditiveArithmetic);
+    }
+
+    // Differentiable.move(along:)
+    if (name.isCompoundName() && name.getBaseName() == ctx.Id_move) {
+      auto argumentNames = name.getArgumentNames();
+      if (argumentNames.size() == 1 && argumentNames[0] == ctx.Id_along)
+        return getRequirement(KnownProtocolKind::Differentiable);
+    }
 
     // Encodable.encode(to: Encoder)
     if (name.isCompoundName() && name.getBaseName() == ctx.Id_encode) {
@@ -276,6 +304,10 @@ ValueDecl *DerivedConformance::getDerivableRequirement(NominalTypeDecl *nominal,
     // CaseIterable.AllCases
     if (name.isSimpleName(ctx.Id_AllCases))
       return getRequirement(KnownProtocolKind::CaseIterable);
+
+    // Differentiable.TangentVector
+    if (name.isSimpleName(ctx.Id_TangentVector))
+      return getRequirement(KnownProtocolKind::Differentiable);
 
     return nullptr;
   }
@@ -342,7 +374,7 @@ DerivedConformance::declareDerivedProperty(Identifier name,
   propDecl->copyFormalAccessFrom(Nominal, /*sourceIsParentContext*/ true);
   propDecl->setInterfaceType(propertyInterfaceType);
 
-  Pattern *propPat = new (Context) NamedPattern(propDecl, /*implicit*/ true);
+  Pattern *propPat = NamedPattern::createImplicit(Context, propDecl);
   propPat->setType(propertyContextType);
 
   propPat = TypedPattern::createImplicit(Context, propPat, propertyContextType);
@@ -382,7 +414,7 @@ bool DerivedConformance::checkAndDiagnoseDisallowedContext(
         isa<ExtensionDecl>(ConformanceDecl)) {
       ConformanceDecl->diagnose(
           diag::cannot_synthesize_init_in_extension_of_nonfinal,
-          getProtocolType(), synthesizing->getFullName());
+          getProtocolType(), synthesizing->getName());
       return true;
     }
   }
@@ -498,7 +530,7 @@ DeclRefExpr *DerivedConformance::convertEnumToIndex(SmallVectorImpl<ASTNode> &st
   indexVar->setImplicit();
 
   // generate: var indexVar
-  Pattern *indexPat = new (C) NamedPattern(indexVar, /*implicit*/ true);
+  Pattern *indexPat = NamedPattern::createImplicit(C, indexVar);
   indexPat->setType(intType);
   indexPat = TypedPattern::createImplicit(C, indexPat, intType);
   indexPat->setType(intType);
@@ -529,8 +561,8 @@ DeclRefExpr *DerivedConformance::convertEnumToIndex(SmallVectorImpl<ASTNode> &st
     assignExpr->setType(TupleType::getEmpty(C));
     auto body = BraceStmt::create(C, SourceLoc(), ASTNode(assignExpr),
                                   SourceLoc());
-    cases.push_back(CaseStmt::create(C, SourceLoc(), labelItem, SourceLoc(),
-                                     SourceLoc(), body,
+    cases.push_back(CaseStmt::create(C, CaseParentKind::Switch, SourceLoc(),
+                                     labelItem, SourceLoc(), SourceLoc(), body,
                                      /*case body vardecls*/ None));
   }
 
@@ -566,7 +598,7 @@ DerivedConformance::associatedValuesNotConformingToProtocol(DeclContext *DC, Enu
     for (auto param : *PL) {
       auto type = param->getInterfaceType();
       if (TypeChecker::conformsToProtocol(DC->mapTypeIntoContext(type),
-                                          protocol, DC, None)
+                                          protocol, DC)
               .isInvalid()) {
         nonconformingAssociatedValues.push_back(param);
       }
@@ -619,14 +651,13 @@ DerivedConformance::enumElementPayloadSubpattern(EnumElementDecl *enumElementDec
 
       auto namedPattern = new (C) NamedPattern(payloadVar);
       namedPattern->setImplicit();
-      auto letPattern = new (C) VarPattern(SourceLoc(), /*isLet*/ true,
-                                           namedPattern);
+      auto letPattern = VarPattern::createImplicit(C, /*isLet*/ true,
+                                                   namedPattern);
       elementPatterns.push_back(TuplePatternElt(tupleElement.getName(),
                                                 SourceLoc(), letPattern));
     }
 
-    auto pat = TuplePattern::create(C, SourceLoc(), elementPatterns,
-                                    SourceLoc());
+    auto pat = TuplePattern::createImplicit(C, elementPatterns);
     pat->setImplicit();
     return pat;
   }
@@ -642,9 +673,7 @@ DerivedConformance::enumElementPayloadSubpattern(EnumElementDecl *enumElementDec
   namedPattern->setImplicit();
   auto letPattern = new (C) VarPattern(SourceLoc(), /*isLet*/ true,
                                        namedPattern);
-  auto pat = new (C) ParenPattern(SourceLoc(), letPattern, SourceLoc());
-  pat->setImplicit();
-  return pat;
+  return ParenPattern::createImplicit(C, letPattern);
 }
 
 

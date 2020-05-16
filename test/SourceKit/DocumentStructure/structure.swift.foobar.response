@@ -1,6 +1,6 @@
 {
   key.offset: 0,
-  key.length: 2689,
+  key.length: 2858,
   key.diagnostic_stage: source.diagnostic.stage.swift.parse,
   key.substructure: [
     {
@@ -1645,6 +1645,98 @@
       key.namelength: 5,
       key.bodyoffset: 2675,
       key.bodylength: 8
+    },
+    {
+      key.kind: source.lang.swift.decl.protocol,
+      key.accessibility: source.lang.swift.accessibility.internal,
+      key.name: "MyProtocol",
+      key.offset: 2708,
+      key.length: 71,
+      key.nameoffset: 2717,
+      key.namelength: 10,
+      key.bodyoffset: 2747,
+      key.bodylength: 31,
+      key.inheritedtypes: [
+        {
+          key.name: "NSObjectProtocol"
+        }
+      ],
+      key.attributes: [
+        {
+          key.offset: 2702,
+          key.length: 5,
+          key.attribute: source.decl.attribute.objc
+        }
+      ],
+      key.elements: [
+        {
+          key.kind: source.lang.swift.structure.elem.typeref,
+          key.offset: 2729,
+          key.length: 16
+        }
+      ],
+      key.substructure: [
+        {
+          key.kind: source.lang.swift.decl.var.instance,
+          key.accessibility: source.lang.swift.accessibility.internal,
+          key.name: "thing",
+          key.offset: 2752,
+          key.length: 25,
+          key.typename: "NSObject",
+          key.nameoffset: 2756,
+          key.namelength: 5,
+          key.bodyoffset: 2773,
+          key.bodylength: 3
+        }
+      ]
+    },
+    {
+      key.kind: source.lang.swift.decl.class,
+      key.accessibility: source.lang.swift.accessibility.internal,
+      key.name: "A",
+      key.offset: 2788,
+      key.length: 69,
+      key.nameoffset: 2794,
+      key.namelength: 1,
+      key.bodyoffset: 2797,
+      key.bodylength: 59,
+      key.substructure: [
+        {
+          key.kind: source.lang.swift.decl.function.method.instance,
+          key.accessibility: source.lang.swift.accessibility.internal,
+          key.name: "foo(a:)",
+          key.offset: 2827,
+          key.length: 19,
+          key.selector_name: "fooWithA:",
+          key.nameoffset: 2832,
+          key.namelength: 11,
+          key.bodyoffset: 2845,
+          key.bodylength: 0,
+          key.attributes: [
+            {
+              key.offset: 2821,
+              key.length: 5,
+              key.attribute: source.decl.attribute.objc.name
+            },
+            {
+              key.offset: 2811,
+              key.length: 9,
+              key.attribute: source.decl.attribute.ibaction
+            }
+          ],
+          key.substructure: [
+            {
+              key.kind: source.lang.swift.decl.var.parameter,
+              key.name: "a",
+              key.offset: 2836,
+              key.length: 6,
+              key.typename: "Int",
+              key.nameoffset: 2836,
+              key.namelength: 1
+            }
+          ]
+        }
+      ]
     }
   ],
   key.diagnostics: [

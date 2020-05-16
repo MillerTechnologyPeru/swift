@@ -88,7 +88,7 @@ func testDiags() {
   tuplify(true) { _ in
     17
     for c in name { // expected-error{{closure containing control flow statement cannot be used with function builder 'TupleBuilder'}}
-    // expected-error@-1 {{use of unresolved identifier 'name'}}
+    // expected-error@-1 {{cannot find 'name' in scope}}
     }
   }
 
@@ -418,12 +418,12 @@ func testNonExhaustiveSwitch(e: E) {
 // rdar://problem/59856491
 struct TestConstraintGenerationErrors {
   @TupleBuilder var buildTupleFnBody: String {
-    String(nothing) // expected-error {{use of unresolved identifier 'nothing'}}
+    String(nothing) // expected-error {{cannot find 'nothing' in scope}}
   }
 
   func buildTupleClosure() {
     tuplify(true) { _ in
-      String(nothing) // expected-error {{use of unresolved identifier 'nothing'}}
+      String(nothing) // expected-error {{cannot find 'nothing' in scope}}
     }
   }
 }
@@ -539,4 +539,22 @@ func testWrapperBuilder() {
   }
 
   let _: Int = x // expected-error{{cannot convert value of type 'Wrapper<(Double, String)>' to specified type 'Int'}}
+}
+
+// rdar://problem/61347993 - empty function builder doesn't compile
+func rdar61347993() {
+  struct Result {}
+
+  @_functionBuilder
+  struct Builder {
+    static func buildBlock() -> Result {
+      Result()
+    }
+  }
+
+  func test_builder<T>(@Builder _: () -> T) {}
+  test_builder {} // Ok
+
+  func test_closure(_: () -> Result) {}
+  test_closure {} // expected-error {{cannot convert value of type '()' to closure result type 'Result'}}
 }

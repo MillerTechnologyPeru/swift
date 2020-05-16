@@ -225,8 +225,9 @@ deriveBodyCodingKey_enum_stringValue(AbstractFunctionDecl *strValDecl, void *) {
       auto *returnStmt = new (C) ReturnStmt(SourceLoc(), caseValue);
       auto *caseBody = BraceStmt::create(C, SourceLoc(), ASTNode(returnStmt),
                                          SourceLoc());
-      cases.push_back(CaseStmt::create(C, SourceLoc(), labelItem, SourceLoc(),
-                                       SourceLoc(), caseBody,
+      cases.push_back(CaseStmt::create(C, CaseParentKind::Switch, SourceLoc(),
+                                       labelItem, SourceLoc(), SourceLoc(),
+                                       caseBody,
                                        /*case body var decls*/ None));
     }
 
@@ -292,20 +293,20 @@ deriveBodyCodingKey_init_stringValue(AbstractFunctionDecl *initDecl, void *) {
 
     auto *body = BraceStmt::create(C, SourceLoc(), ASTNode(assignment),
                                    SourceLoc());
-    cases.push_back(CaseStmt::create(C, SourceLoc(), labelItem, SourceLoc(),
-                                     SourceLoc(), body,
+    cases.push_back(CaseStmt::create(C, CaseParentKind::Switch, SourceLoc(),
+                                     labelItem, SourceLoc(), SourceLoc(), body,
                                      /*case body var decls*/ None));
   }
 
-  auto *anyPat = new (C) AnyPattern(SourceLoc());
-  anyPat->setImplicit();
+  auto *anyPat = AnyPattern::createImplicit(C);
   auto dfltLabelItem = CaseLabelItem::getDefault(anyPat);
 
   auto *dfltReturnStmt = new (C) FailStmt(SourceLoc(), SourceLoc());
   auto *dfltBody = BraceStmt::create(C, SourceLoc(), ASTNode(dfltReturnStmt),
                                      SourceLoc());
-  cases.push_back(CaseStmt::create(C, SourceLoc(), dfltLabelItem, SourceLoc(),
-                                   SourceLoc(), dfltBody,
+  cases.push_back(CaseStmt::create(C, CaseParentKind::Switch, SourceLoc(),
+                                   dfltLabelItem, SourceLoc(), SourceLoc(),
+                                   dfltBody,
                                    /*case body var decls*/ None));
 
   auto *stringValueDecl = initDecl->getParameters()->get(0);
@@ -417,7 +418,7 @@ ValueDecl *DerivedConformance::deriveCodingKey(ValueDecl *requirement) {
 
     return deriveProperty(*this, optionalIntType, Context.Id_intValue, synth);
   } else if (name == DeclBaseName::createConstructor()) {
-    auto argumentNames = requirement->getFullName().getArgumentNames();
+    auto argumentNames = requirement->getName().getArgumentNames();
     if (argumentNames.size() == 1) {
       if (argumentNames[0] == Context.Id_stringValue) {
         // Derive `init?(stringValue:)`

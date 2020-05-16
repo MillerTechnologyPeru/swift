@@ -23,7 +23,9 @@
 #include "swift/Basic/SourceLoc.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/TinyPtrVector.h"
+#include "swift/AST/ModuleDependencies.h"
 
 namespace llvm {
 class FileCollector;
@@ -36,12 +38,17 @@ class DependencyCollector;
 namespace swift {
 
 class AbstractFunctionDecl;
+struct AutoDiffConfig;
 class ClangImporterOptions;
 class ClassDecl;
 class FileUnit;
 class ModuleDecl;
+class ModuleDependencies;
+class ModuleDependenciesCache;
 class NominalTypeDecl;
+class SourceFile;
 class TypeDecl;
+class CompilerInstance;
 
 enum class KnownProtocolKind : uint8_t;
 
@@ -77,6 +84,27 @@ public:
   /// Return the underlying clang::DependencyCollector that this
   /// class wraps.
   std::shared_ptr<clang::DependencyCollector> getClangCollector();
+};
+
+struct SubCompilerInstanceInfo {
+  StringRef CompilerVersion;
+  CompilerInstance* Instance;
+};
+
+/// Abstract interface to run an action in a sub ASTContext.
+struct InterfaceSubContextDelegate {
+  virtual bool runInSubContext(StringRef moduleName,
+                               StringRef interfacePath,
+                               StringRef outputPath,
+                               SourceLoc diagLoc,
+                               llvm::function_ref<bool(ASTContext&)> action) = 0;
+  virtual bool runInSubCompilerInstance(StringRef moduleName,
+                                        StringRef interfacePath,
+                                        StringRef outputPath,
+                                        SourceLoc diagLoc,
+                    llvm::function_ref<bool(SubCompilerInstanceInfo&)> action) = 0;
+
+  virtual ~InterfaceSubContextDelegate() = default;
 };
 
 /// Abstract interface that loads named modules into the AST.
@@ -153,12 +181,36 @@ public:
                  unsigned previousGeneration,
                  llvm::TinyPtrVector<AbstractFunctionDecl *> &methods) = 0;
 
+  /// Load derivative function configurations for the given
+  /// AbstractFunctionDecl.
+  ///
+  /// \param originalAFD The declaration whose derivative function
+  /// configurations should be loaded.
+  ///
+  /// \param previousGeneration The previous generation number. The AST already
+  /// contains derivative function configurations loaded from any generation up
+  /// to and including this one.
+  ///
+  /// \param results The result list of derivative function configurations.
+  /// This list will be extended with any methods found in subsequent
+  /// generations.
+  virtual void loadDerivativeFunctionConfigurations(
+      AbstractFunctionDecl *originalAFD, unsigned previousGeneration,
+      llvm::SetVector<AutoDiffConfig> &results) {};
+
   /// Verify all modules loaded by this loader.
   virtual void verifyAllModules() { }
 
   /// Discover overlays declared alongside this file and add infomation about
   /// them to it.
   void findOverlayFiles(SourceLoc diagLoc, ModuleDecl *module, FileUnit *file);
+
+  /// Retrieve the dependencies for the given, named module, or \c None
+  /// if no such module exists.
+  virtual Optional<ModuleDependencies> getModuleDependencies(
+      StringRef moduleName,
+      ModuleDependenciesCache &cache,
+      InterfaceSubContextDelegate &delegate) = 0;
 };
 
 } // namespace swift

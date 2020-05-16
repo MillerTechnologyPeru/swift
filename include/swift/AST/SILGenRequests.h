@@ -18,6 +18,7 @@
 #define SWIFT_SILGEN_REQUESTS_H
 
 #include "swift/AST/ASTTypeIDs.h"
+#include "swift/AST/EvaluatorDependencies.h"
 #include "swift/AST/SimpleRequest.h"
 
 namespace swift {
@@ -40,7 +41,7 @@ void reportEvaluatedRequest(UnifiedStatsReporter &stats,
                             const Request &request);
 
 struct SILGenDescriptor {
-  llvm::PointerUnion<ModuleDecl *, FileUnit *> context;
+  llvm::PointerUnion<FileUnit *, ModuleDecl *> context;
   Lowering::TypeConverter &conv;
   const SILOptions &opts;
 
@@ -72,16 +73,24 @@ public:
                                          const SILOptions &opts) {
     return SILGenDescriptor{mod, conv, opts};
   }
+
+  /// For a single file input, returns a single element array containing that
+  /// file. Otherwise returns an array of each file in the module.
+  ArrayRef<FileUnit *> getFiles() const;
+
+  /// If the module or file contains SIL that needs parsing, returns the file
+  /// to be parsed, or \c nullptr if parsing isn't required.
+  SourceFile *getSourceFileToParse() const;
 };
 
 void simple_display(llvm::raw_ostream &out, const SILGenDescriptor &d);
 
 SourceLoc extractNearestSourceLoc(const SILGenDescriptor &desc);
 
-class SILGenSourceFileRequest :
-    public SimpleRequest<SILGenSourceFileRequest,
-                         std::unique_ptr<SILModule>(SILGenDescriptor),
-                         CacheKind::Uncached> {
+class SILGenerationRequest
+    : public SimpleRequest<
+          SILGenerationRequest, std::unique_ptr<SILModule>(SILGenDescriptor),
+          RequestFlags::Uncached | RequestFlags::DependencySource> {
 public:
   using SimpleRequest::SimpleRequest;
 
@@ -89,17 +98,20 @@ private:
   friend SimpleRequest;
 
   // Evaluation.
-  llvm::Expected<std::unique_ptr<SILModule>>
+  std::unique_ptr<SILModule>
   evaluate(Evaluator &evaluator, SILGenDescriptor desc) const;
 
 public:
-  bool isCached() const { return true; }
+  // Incremental dependencies.
+  evaluator::DependencySource
+  readDependencySource(const evaluator::DependencyCollector &) const;
 };
 
-class SILGenWholeModuleRequest :
-    public SimpleRequest<SILGenWholeModuleRequest,
-                         std::unique_ptr<SILModule>(SILGenDescriptor),
-                         CacheKind::Uncached> {
+/// Parses a .sil file into a SILModule.
+class ParseSILModuleRequest
+    : public SimpleRequest<ParseSILModuleRequest,
+                           std::unique_ptr<SILModule>(SILGenDescriptor),
+                           RequestFlags::Uncached> {
 public:
   using SimpleRequest::SimpleRequest;
 
@@ -107,11 +119,8 @@ private:
   friend SimpleRequest;
 
   // Evaluation.
-  llvm::Expected<std::unique_ptr<SILModule>>
+  std::unique_ptr<SILModule>
   evaluate(Evaluator &evaluator, SILGenDescriptor desc) const;
-
-public:
-  bool isCached() const { return true; }
 };
 
 /// The zone number for SILGen.

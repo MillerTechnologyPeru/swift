@@ -332,13 +332,9 @@ ParserStatus Parser::parseGenericWhereClause(
       } else {
         // Parse the protocol or composition.
         ParserResult<TypeRepr> Protocol = parseType();
-
-        if (Protocol.isNull()) {
-          Status.setIsParseError();
-          if (Protocol.hasCodeCompletion())
-            Status.setHasCodeCompletion();
-          break;
-        }
+        Status |= Protocol;
+        if (Protocol.isNull())
+          Protocol = makeParserResult(new (Context) ErrorTypeRepr(PreviousLoc));
 
         // Add the requirement.
         Requirements.push_back(RequirementRepr::getTypeConstraint(
@@ -356,17 +352,18 @@ ParserStatus Parser::parseGenericWhereClause(
 
       // Parse the second type.
       ParserResult<TypeRepr> SecondType = parseType();
-      if (SecondType.isNull()) {
-        Status.setIsParseError();
-        if (SecondType.hasCodeCompletion())
-          Status.setHasCodeCompletion();
-        break;
-      }
+      Status |= SecondType;
+      if (SecondType.isNull())
+        SecondType = makeParserResult(new (Context) ErrorTypeRepr(PreviousLoc));
 
       // Add the requirement
       Requirements.push_back(RequirementRepr::getSameType(FirstType.get(),
                                                       EqualLoc,
                                                       SecondType.get()));
+    } else if (FirstType.hasCodeCompletion()) {
+      // Recover by adding dummy constraint.
+      Requirements.push_back(RequirementRepr::getTypeConstraint(
+          FirstType.get(), PreviousLoc, new (Context) ErrorTypeRepr(PreviousLoc)));
     } else {
       BodyContext->setTransparent();
       diagnose(Tok, diag::expected_requirement_delim);
@@ -418,12 +415,10 @@ parseFreestandingGenericWhereClause(GenericContext *genCtx,
 
     genericParams->addTrailingWhereClause(Context, WhereLoc, Requirements);
 
-  // A where clause that references only outer generic parameters?
-  } else if (flags.contains(PD_HasContainerType)) {
+  } else {
+    // A where clause against outer generic parameters.
     genCtx->setTrailingWhereClause(
         TrailingWhereClause::create(Context, WhereLoc, Requirements));
-  } else {
-    diagnose(WhereLoc, diag::where_toplevel_nongeneric);
   }
 
   return ParserStatus();

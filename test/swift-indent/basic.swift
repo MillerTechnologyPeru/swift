@@ -83,6 +83,27 @@ bax(34949494949)
     .baz
 
 
+// Enum element parameters should be aligned, and raw values should be indented.
+
+enum TestEnum {
+    case first(x: Int,
+               y: Int,
+               z: Int),
+         second(
+            x: Int,
+            y: Int
+         )
+    case third
+}
+
+enum RawEnum: String {
+    case aCaseWithAParticularlyLongNameSoTheValueIsWrapped =
+            "a long message here",
+         aNotherCaseWithAParticularlyLongNameSoTheValueIsWrapped =
+            "a long message here"
+}
+
+
 // Condition elements should align with each other.
 //
 guard let x = Optional.some(10), x > 100,
@@ -287,6 +308,20 @@ let s = """
             c
     """
 
+func wantsToIndentContents() {
+    let dontLetItIndentMyValue = """
+a
+    b
+        c
+"""
+}
+
+print("""
+    foo {
+        bar()
+    }
+    """)
+
 
 // Interpolations shouldn't change how multiline strings are handled.
 //
@@ -325,6 +360,15 @@ var array: [String] = {
     return ["one",
             "two"]
 }()
+#endif
+#if os(iOS)
+var source: String? {
+    if true {
+        if otherCondition {
+            return "true"
+        }
+    }
+}
 #endif
 
 
@@ -869,6 +913,14 @@ let x = foo<Int,
             String,
             Int>()
 
+let x = foo<
+    Int,
+    String,
+    Int
+>()
+.filter { $0 > 10 }
+.count
+
 
 // Invalid elements should still be indented.
 //
@@ -930,3 +982,36 @@ IncrementedFirst++
     }++
     .baz()
 
+
+// Multiple patterns in catch should align exactly.
+
+do {
+    print("hello")
+} catch MyErr.a(let code, let message),
+        MyErr.b(
+            let code,
+            let message
+        ),
+        MyErr.c(let code, let message) {
+    print("ahhh!")
+}
+
+do {
+    throw MyErr.a
+} catch where foo == 0,
+        where bar == 1 {
+}
+
+do
+{
+    print("hello")
+}
+catch MyErr.a(let code, let message),
+      MyErr.b(
+        let code,
+        let message
+      ),
+      MyErr.c(let code, let message)
+{
+    print("ahhh!")
+}

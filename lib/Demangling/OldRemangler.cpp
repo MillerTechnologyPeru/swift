@@ -1168,6 +1168,26 @@ void Remangler::mangleThinFunctionType(Node *node) {
   mangleChildNodes(node); // argument tuple, result type
 }
 
+void Remangler::mangleDifferentiableFunctionType(Node *node) {
+  Buffer << "XF";
+  mangleChildNodes(node); // argument tuple, result type
+}
+
+void Remangler::mangleEscapingDifferentiableFunctionType(Node *node) {
+  Buffer << "XG";
+  mangleChildNodes(node); // argument tuple, result type
+}
+
+void Remangler::mangleLinearFunctionType(Node *node) {
+  Buffer << "XH";
+  mangleChildNodes(node); // argument tuple, result type
+}
+
+void Remangler::mangleEscapingLinearFunctionType(Node *node) {
+  Buffer << "XI";
+  mangleChildNodes(node); // argument tuple, result type
+}
+
 void Remangler::mangleArgumentTuple(Node *node) {
   mangleSingleChildNode(node);
 }
@@ -1258,6 +1278,16 @@ void Remangler::mangleImplYield(Node *node) {
   mangleChildNodes(node); // impl convention, type
 }
 
+void Remangler::mangleImplDifferentiable(Node *node) {
+  // TODO(TF-750): Check if this code path actually triggers and add a test.
+  Buffer << 'd';
+}
+
+void Remangler::mangleImplLinear(Node *node) {
+  // TODO(TF-750): Check if this code path actually triggers and add a test.
+  Buffer << 'l';
+}
+
 void Remangler::mangleImplEscaping(Node *node) {
   // The old mangler does not encode escaping.
 }
@@ -1294,6 +1324,19 @@ void Remangler::mangleImplConvention(Node *node) {
   } else {
     unreachable("invalid impl convention");
   }
+}
+
+void Remangler::mangleImplDifferentiability(Node *node) {
+  assert(node->getKind() == Node::Kind::ImplDifferentiability);
+  StringRef text = node->getText();
+  // Empty string represents default differentiability.
+  if (text.empty())
+    return;
+  if (text == "@noDerivative") {
+    Buffer << 'w';
+    return;
+  }
+  unreachable("Invalid impl differentiability");
 }
 
 void Remangler::mangleDynamicSelf(Node *node) {

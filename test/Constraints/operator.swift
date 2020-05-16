@@ -217,10 +217,11 @@ func rdar46459603() {
   var arr = ["key": e]
 
   _ = arr.values == [e]
-  // expected-error@-1 {{binary operator '==' cannot be applied to operands of type 'Dictionary<String, E>.Values' and '[E]'}}
+  // expected-error@-1 {{referencing operator function '==' on 'Equatable' requires that 'Dictionary<String, E>.Values' conform to 'Equatable'}}
+  // expected-error@-2 {{cannot convert value of type '[E]' to expected argument type 'Dictionary<String, E>.Values'}}
   _ = [arr.values] == [[e]]
-  // expected-error@-1 {{value of protocol type 'Any' cannot conform to 'Equatable'; only struct/enum/class types can conform to protocols}}
-  // expected-note@-2 {{requirement from conditional conformance of '[Any]' to 'Equatable'}}
+  // expected-error@-1 {{operator function '==' requires that 'Dictionary<String, E>.Values' conform to 'Equatable'}}
+  // expected-error@-2 {{cannot convert value of type '[E]' to expected element type 'Dictionary<String, E>.Values'}}
 }
 
 // SR-10843
@@ -263,5 +264,29 @@ func rdar_60185506() {
 
   func test(x: X?) {
     let _ = (x?.foo ?? 0) <= 0.5 // Ok
+  }
+}
+
+// rdar://problem/60727310
+func rdar60727310() {
+  func myAssertion<T>(_ a: T, _ op: ((T,T)->Bool), _ b: T) {}
+  var e: Error? = nil
+  myAssertion(e, ==, nil) // expected-error {{binary operator '==' cannot be applied to two 'Error?' operands}}
+}
+
+// FIXME(SR-12438): Bad diagnostic.
+func sr12438(_ e: Error) {
+  func foo<T>(_ a: T, _ op: ((T, T) -> Bool)) {}
+  foo(e, ==) // expected-error {{type of expression is ambiguous without more context}}
+}
+
+// rdar://problem/62054241 - Swift compiler crashes when passing < as the sort function in sorted(by:) and the type of the array is not comparable
+func rdar_62054241() {
+  struct Foo {
+    let a: Int
+  }
+
+  func test(_ arr: [Foo]) -> [Foo] {
+    return arr.sorted(by: <) // expected-error {{no exact matches in reference to operator function '<'}}
   }
 }

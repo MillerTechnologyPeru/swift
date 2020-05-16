@@ -83,8 +83,8 @@ The set of jobs that are run, and the way they spend their time, is itself
 highly dependent on **compilation modes**. Information concerning those modes
 that's relevant to compilation performance is recounted in the following
 section; for more details on the driver, see [the driver docs](Driver.md), as
-well as docs on [driver internals](DriverInternals.rst)
-and [driver parseable output](DriverParseableOutput.rst).
+well as docs on [driver internals](DriverInternals.md)
+and [driver parseable output](DriverParseableOutput.md).
 
 After discussing compilation modes in the following section, we'll also touch on
 large-scale variation in workload that can occur _without_ obvious hotspots, in
@@ -100,8 +100,7 @@ running in, and often to perform separate analysis for each mode. The
 significant modes are:
 
   - **Primary-file** vs. **whole-module**: this varies depending on whether the
-    driver is run with the flag `-wmo`, `-whole-module-optimization` or
-    `-force-single-frontend-invocation` (all these options are synonymous).
+    driver is run with the flag `-wmo` (a.k.a. `-whole-module-optimization`).
 
     - **Batch** vs. **single-file** primary-file mode. This distinction refines
     the behaviour of primary-file mode, with the new batch mode added in the
@@ -570,7 +569,7 @@ compilers on hand while you're working.
     Total Execution Time: 0.0876 seconds (0.0877 wall clock)
 
      ---User Time---   --System Time--   --User+System--   ---Wall Time---  --- Name ---
-     0.0241 ( 53.9%)   0.0394 ( 92.0%)   0.0635 ( 72.5%)   0.0635 ( 72.5%)  Name binding
+     0.0241 ( 53.9%)   0.0394 ( 92.0%)   0.0635 ( 72.5%)   0.0635 ( 72.5%)  Import resolution
      0.0170 ( 38.0%)   0.0025 (  5.8%)   0.0195 ( 22.3%)   0.0195 ( 22.2%)  Type checking / Semantic analysis
      0.0013 (  3.0%)   0.0004 (  0.8%)   0.0017 (  1.9%)   0.0017 (  1.9%)  LLVM output
      0.0010 (  2.3%)   0.0003 (  0.7%)   0.0013 (  1.5%)   0.0013 (  1.5%)  SILGen
@@ -1143,7 +1142,7 @@ driver. These files contain the driver's summary-view of the dependencies
 between entities defined and referenced in each source file; it is from these
 files that the driver decides when a file "needs" to be rebuilt because it
 depends on another file that needs to be rebuilt, and so on transitively. The
-file format is [documented here](DependencyAnalysis.rst).
+file format is [documented here](DependencyAnalysis.md).
 
 ### Finding areas in need of general improvement
 

@@ -172,3 +172,15 @@ protocol BarProtocol {}
 var var_with_didset = 10 {
   didSet { print(oldValue) }
 }
+
+#if os(iOS)
+@objc protocol MyProtocol: NSObjectProtocol {
+    var thing: NSObject {get}
+}
+#endif
+
+class A {
+  #if true
+  @IBAction @objc func foo(a: Int) {}
+  #endif
+}

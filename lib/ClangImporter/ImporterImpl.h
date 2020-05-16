@@ -135,9 +135,10 @@ enum class ImportTypeKind {
 
   /// Import the type of a function parameter.
   ///
-  /// This provides special treatment for C++ references (which become
-  /// [inout] parameters) and C pointers (which become magic [inout]-able types),
-  /// among other things, and enables the conversion of bridged types.
+  /// Special handling:
+  /// * C and C++ pointers become `UnsafePointer?` or `UnsafeMutablePointer?`
+  /// * C++ references become `UnsafePointer` or `UnsafeMutablePointer`
+  /// * Bridging that requires type conversions is allowed.
   /// Parameters are always considered CF-audited.
   Parameter,
 
@@ -254,7 +255,7 @@ public:
   /// API is now unavailable.
   std::string deprecatedAsUnavailableMessage;
 
-  PlatformAvailability(LangOptions &opts);
+  PlatformAvailability(const LangOptions &opts);
 
 private:
   PlatformAvailability(const PlatformAvailability&) = delete;
@@ -1290,6 +1291,17 @@ public:
     llvm_unreachable("unimplemented for ClangImporter");
   }
 
+  AbstractFunctionDecl *
+  loadReferencedFunctionDecl(const DerivativeAttr *DA,
+                             uint64_t contextData) override {
+    llvm_unreachable("unimplemented for ClangImporter");
+  }
+
+  Type loadTypeEraserType(const TypeEraserAttr *TRA,
+                          uint64_t contextData) override {
+    llvm_unreachable("unimplemented for ClangImporter");
+  }
+
   void loadRequirementSignature(const ProtocolDecl *decl, uint64_t contextData,
                                 SmallVectorImpl<Requirement> &reqs) override {
     llvm_unreachable("unimplemented for ClangImporter");
@@ -1416,6 +1428,16 @@ bool shouldSuppressDeclImport(const clang::Decl *decl);
 /// Identifies certain UIKit constants that used to have overlay equivalents,
 /// but are now renamed using the swift_name attribute.
 bool isSpecialUIKitStructZeroProperty(const clang::NamedDecl *decl);
+
+/// Add command-line arguments for a normal import of Clang code.
+void getNormalInvocationArguments(std::vector<std::string> &invocationArgStrs,
+                                  ASTContext &ctx,
+                                  const ClangImporterOptions &importerOpts);
+
+/// Add command-line arguments common to all imports of Clang code.
+void addCommonInvocationArguments(std::vector<std::string> &invocationArgStrs,
+                                  ASTContext &ctx,
+                                  const ClangImporterOptions &importerOpts);
 
 /// Finds a particular kind of nominal by looking through typealiases.
 template <typename T>

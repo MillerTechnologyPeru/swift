@@ -163,8 +163,6 @@ public:
   /// Instruction visitors.
   SILInstruction *visitReleaseValueInst(ReleaseValueInst *DI);
   SILInstruction *visitRetainValueInst(RetainValueInst *CI);
-  SILInstruction *visitReleaseValueAddrInst(ReleaseValueAddrInst *DI);
-  SILInstruction *visitRetainValueAddrInst(RetainValueAddrInst *CI);
   SILInstruction *visitPartialApplyInst(PartialApplyInst *AI);
   SILInstruction *visitApplyInst(ApplyInst *AI);
   SILInstruction *visitBeginApplyInst(BeginApplyInst *BAI);
@@ -208,14 +206,12 @@ public:
   SILInstruction *visitTupleExtractInst(TupleExtractInst *TEI);
   SILInstruction *visitFixLifetimeInst(FixLifetimeInst *FLI);
   SILInstruction *visitSwitchValueInst(SwitchValueInst *SVI);
-  SILInstruction *visitSelectValueInst(SelectValueInst *SVI);
   SILInstruction *
   visitCheckedCastAddrBranchInst(CheckedCastAddrBranchInst *CCABI);
   SILInstruction *
   visitCheckedCastBranchInst(CheckedCastBranchInst *CBI);
   SILInstruction *visitUnreachableInst(UnreachableInst *UI);
   SILInstruction *visitAllocRefDynamicInst(AllocRefDynamicInst *ARDI);
-  SILInstruction *visitEnumInst(EnumInst *EI);
       
   SILInstruction *visitMarkDependenceInst(MarkDependenceInst *MDI);
   SILInstruction *visitClassifyBridgeObjectInst(ClassifyBridgeObjectInst *CBOI);
@@ -228,6 +224,8 @@ public:
 
   // Optimize the "isConcrete" builtin.
   SILInstruction *optimizeBuiltinIsConcrete(BuiltinInst *I);
+
+  SILInstruction *optimizeBuiltinCOWBufferForReading(BuiltinInst *BI);
 
   // Optimize the "trunc_N1_M2" builtin. if N1 is a result of "zext_M1_*" and
   // the following holds true: N1 > M1 and M2>= M1
@@ -245,7 +243,9 @@ public:
 
   bool tryOptimizeKeypath(ApplyInst *AI);
   bool tryOptimizeInoutKeypath(BeginApplyInst *AI);
-
+  bool tryOptimizeKeypathApplication(ApplyInst *AI, SILFunction *callee);
+  bool tryOptimizeKeypathKVCString(ApplyInst *AI, SILDeclRef callee);
+      
   // Optimize concatenation of string literals.
   // Constant-fold concatenation of string literals known at compile-time.
   SILInstruction *optimizeConcatenationOfStringLiterals(ApplyInst *AI);
@@ -263,8 +263,6 @@ private:
           replaceValueUsesWith(oldValue, newValue);
         });
   }
-
-  FullApplySite rewriteApplyCallee(FullApplySite apply, SILValue callee);
 
   // Build concrete existential information using findInitExistential.
   Optional<ConcreteOpenedExistentialInfo>

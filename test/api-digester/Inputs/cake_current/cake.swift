@@ -241,3 +241,9 @@ open class AddingNewDesignatedInit {
     print(foo)
   }
 }
+
+public extension Float {
+  func floatHigher() {}
+}
+
+infix operator <==> : AssignmentPrecedence

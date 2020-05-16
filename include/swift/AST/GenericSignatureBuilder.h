@@ -95,7 +95,7 @@ public:
       llvm::PointerUnion<Type, PotentialArchetype *, LayoutConstraint>;
 
   using RequirementRHS =
-    llvm::PointerUnion<Type, PotentialArchetype *, LayoutConstraint>;
+    llvm::PointerUnion<Type, LayoutConstraint>;
 
   /// The location of a requirement as written somewhere in the source.
   typedef llvm::PointerUnion<const TypeRepr *, const RequirementRepr *>
@@ -519,11 +519,7 @@ public:
 
     ProtocolConformanceRef operator()(CanType dependentType,
                                       Type conformingReplacementType,
-                                      ProtocolDecl *conformedProtocol) const {
-      return builder->lookupConformance(dependentType,
-                                        conformingReplacementType,
-                                        conformedProtocol);
-    }
+                                      ProtocolDecl *conformedProtocol) const;
   };
 
   /// Retrieve a function that can perform conformance lookup for this
@@ -1546,17 +1542,10 @@ class GenericSignatureBuilder::PotentialArchetype {
   llvm::MapVector<Identifier, StoredNestedType> NestedTypes;
 
   /// Construct a new potential archetype for a concrete declaration.
-  PotentialArchetype(PotentialArchetype *parent, AssociatedTypeDecl *assocType)
-      : parentOrContext(parent), identifier(assocType) {
-    assert(parent != nullptr && "Not a nested type?");
-    assert(assocType->getOverriddenDecls().empty());
-  }
+  PotentialArchetype(PotentialArchetype *parent, AssociatedTypeDecl *assocType);
 
   /// Construct a new potential archetype for a generic parameter.
-  PotentialArchetype(ASTContext &ctx, GenericParamKey genericParam)
-    : parentOrContext(&ctx), identifier(genericParam)
-  {
-  }
+  PotentialArchetype(ASTContext &ctx, GenericParamKey genericParam);
 
 public:
   /// Retrieve the representative for this archetype, performing

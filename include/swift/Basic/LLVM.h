@@ -34,12 +34,16 @@ namespace llvm {
   class Twine;
   template <typename T> class SmallPtrSetImpl;
   template <typename T, unsigned N> class SmallPtrSet;
+#if !defined(swiftCore_EXPORTS)
   template <typename T> class SmallVectorImpl;
+#endif
   template <typename T, unsigned N> class SmallVector;
   template <unsigned N> class SmallString;
   template <typename T, unsigned N> class SmallSetVector;
+#if !defined(swiftCore_EXPORTS)
   template<typename T> class ArrayRef;
   template<typename T> class MutableArrayRef;
+#endif
   template<typename T> class TinyPtrVector;
   template<typename T> class Optional;
   template <typename ...PTs> class PointerUnion;
@@ -50,7 +54,9 @@ namespace llvm {
   class raw_ostream;
   class APInt;
   class APFloat;
+#if !defined(swiftCore_EXPORTS)
   template <typename Fn> class function_ref;
+#endif
 } // end namespace llvm
 
 
@@ -63,9 +69,11 @@ namespace swift {
   using llvm::cast_or_null;
 
   // Containers.
+#if !defined(swiftCore_EXPORTS)
   using llvm::ArrayRef;
-  using llvm::iterator_range;
   using llvm::MutableArrayRef;
+#endif
+  using llvm::iterator_range;
   using llvm::None;
   using llvm::Optional;
   using llvm::PointerUnion;
@@ -75,7 +83,9 @@ namespace swift {
   using llvm::SmallSetVector;
   using llvm::SmallString;
   using llvm::SmallVector;
+#if !defined(swiftCore_EXPORTS)
   using llvm::SmallVectorImpl;
+#endif
   using llvm::StringLiteral;
   using llvm::StringRef;
   using llvm::TinyPtrVector;
@@ -84,7 +94,9 @@ namespace swift {
   // Other common classes.
   using llvm::APFloat;
   using llvm::APInt;
+#if !defined(swiftCore_EXPORTS)
   using llvm::function_ref;
+#endif
   using llvm::NoneType;
   using llvm::raw_ostream;
 } // end namespace swift

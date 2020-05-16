@@ -91,12 +91,12 @@ public:
 };
 
 /// Check whether the given type witness can be used for the given
-/// associated type.
+/// associated type in the given conformance.
 ///
 /// \returns an empty result on success, or a description of the error.
-CheckTypeWitnessResult checkTypeWitness(DeclContext *dc, ProtocolDecl *proto,
+CheckTypeWitnessResult checkTypeWitness(Type type,
                                         AssociatedTypeDecl *assocType,
-                                        Type type);
+                                        NormalProtocolConformance *Conf);
 
 /// The set of associated types that have been inferred by matching
 /// the given value witness to its corresponding requirement.
@@ -209,9 +209,12 @@ enum class MatchKind : uint8_t {
   /// The witness is explicitly @nonobjc but the requirement is @objc.
   NonObjC,
 
-  /// The witness does not have a `@differentiable` attribute satisfying one
-  /// from the requirement.
-  DifferentiableConflict,
+  /// The witness is missing a `@differentiable` attribute from the requirement.
+  MissingDifferentiableAttr,
+  
+  /// The witness did not match because it is an enum case with
+  /// associated values.
+  EnumCaseWithAssociatedValues,
 };
 
 /// Describes the kind of optional adjustment performed when
@@ -362,7 +365,7 @@ struct RequirementMatch {
       : Witness(witness), Kind(kind), WitnessType(), UnmetAttribute(attr),
         ReqEnv(None) {
     assert(!hasWitnessType() && "Should have witness type");
-    assert(UnmetAttribute);
+    assert(hasUnmetAttribute() && "Should have unmet attribute");
   }
 
   RequirementMatch(ValueDecl *witness, MatchKind kind,
@@ -437,7 +440,8 @@ struct RequirementMatch {
     case MatchKind::RethrowsConflict:
     case MatchKind::ThrowsConflict:
     case MatchKind::NonObjC:
-    case MatchKind::DifferentiableConflict:
+    case MatchKind::MissingDifferentiableAttr:
+    case MatchKind::EnumCaseWithAssociatedValues:
       return false;
     }
 
@@ -467,7 +471,8 @@ struct RequirementMatch {
     case MatchKind::RethrowsConflict:
     case MatchKind::ThrowsConflict:
     case MatchKind::NonObjC:
-    case MatchKind::DifferentiableConflict:
+    case MatchKind::MissingDifferentiableAttr:
+    case MatchKind::EnumCaseWithAssociatedValues:
       return false;
     }
 
@@ -478,7 +483,9 @@ struct RequirementMatch {
   bool hasRequirement() { return Kind == MatchKind::MissingRequirement; }
 
   /// Determine whether this requirement match has an unmet attribute.
-  bool hasUnmetAttribute() { return Kind == MatchKind::DifferentiableConflict; }
+  bool hasUnmetAttribute() {
+    return Kind == MatchKind::MissingDifferentiableAttr;
+  }
 
   swift::Witness getWitness(ASTContext &ctx) const;
 };
@@ -947,6 +954,11 @@ Type adjustInferredAssociatedType(Type type, bool &noescapeToEscaping);
 llvm::TinyPtrVector<ValueDecl *> findWitnessedObjCRequirements(
                                      const ValueDecl *witness,
                                      bool anySingleRequirement = false);
+
+void diagnoseConformanceFailure(Type T,
+                                ProtocolDecl *Proto,
+                                DeclContext *DC,
+                                SourceLoc ComplainLoc);
 
 }
 

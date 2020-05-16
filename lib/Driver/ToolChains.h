@@ -15,6 +15,7 @@
 
 #include "swift/Basic/LLVM.h"
 #include "swift/Driver/ToolChain.h"
+#include "clang/Driver/DarwinSDKInfo.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/Compiler.h"
 
@@ -47,6 +48,11 @@ protected:
   void addDeploymentTargetArgs(llvm::opt::ArgStringList &Arguments,
                                const JobContext &context) const;
 
+  void addCommonFrontendArgs(
+      const OutputInfo &OI, const CommandOutput &output,
+      const llvm::opt::ArgList &inputArgs,
+      llvm::opt::ArgStringList &arguments) const override;
+
   InvocationInfo constructInvocation(const InterpretJobAction &job,
                                      const JobContext &context) const override;
   InvocationInfo constructInvocation(const DynamicLinkJobAction &job,
@@ -58,9 +64,21 @@ protected:
                          const llvm::opt::ArgList &args,
                          StringRef defaultTarget) const override;
 
+  void validateOutputInfo(DiagnosticEngine &diags,
+                          const OutputInfo &outputInfo) const override;
+
   std::string findProgramRelativeToSwiftImpl(StringRef name) const override;
 
   bool shouldStoreInvocationInDebugInfo() const override;
+
+  /// Retrieve the target SDK version for the given target triple.
+  Optional<llvm::VersionTuple>
+  getTargetSDKVersion(const llvm::Triple &triple) const ;
+
+  /// Information about the SDK that the application is being built against.
+  /// This information is only used by the linker, so it is only populated
+  /// when there will be a linker job.
+  mutable Optional<clang::driver::DarwinSDKInfo> SDKInfo;
 
   const Optional<llvm::Triple> TargetVariant;
 

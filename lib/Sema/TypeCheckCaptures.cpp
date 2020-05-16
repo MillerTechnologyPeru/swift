@@ -291,12 +291,12 @@ public:
           if (DC->isLocalContext()) {
             Context.Diags.diagnose(DRE->getLoc(), diag::capture_across_type_decl,
                                    NTD->getDescriptiveKind(),
-                                   D->getBaseName().getIdentifier());
+                                   D->getBaseIdentifier());
 
             NTD->diagnose(diag::kind_declared_here,
                           DescriptiveDeclKind::Type);
 
-            D->diagnose(diag::decl_declared_here, D->getFullName());
+            D->diagnose(diag::decl_declared_here, D->getName());
             return { false, DRE };
           }
         }

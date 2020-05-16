@@ -140,7 +140,8 @@ static void validateBridgingHeaderArgs(DiagnosticEngine &diags,
 static void validateWarningControlArgs(DiagnosticEngine &diags,
                                        const ArgList &args) {
   if (args.hasArg(options::OPT_suppress_warnings) &&
-      args.hasArg(options::OPT_warnings_as_errors)) {
+      args.hasFlag(options::OPT_warnings_as_errors,
+                   options::OPT_no_warnings_as_errors, false)) {
     diags.diagnose(SourceLoc(), diag::error_conflicting_options,
                    "-warnings-as-errors", "-suppress-warnings");
   }
@@ -264,17 +265,31 @@ static void validateArgs(DiagnosticEngine &diags, const ArgList &args,
 std::unique_ptr<ToolChain>
 Driver::buildToolChain(const llvm::opt::InputArgList &ArgList) {
 
-  if (const Arg *A = ArgList.getLastArg(options::OPT_target))
+  if (const Arg *A = ArgList.getLastArg(options::OPT_target)) {
     DefaultTargetTriple = llvm::Triple::normalize(A->getValue());
+  }
 
-  const llvm::Triple target(DefaultTargetTriple);
+  llvm::Triple target(DefaultTargetTriple);
+
+  // Backward compatibility hack: infer "simulator" environment for x86
+  // iOS/tvOS/watchOS.
+  if (tripleInfersSimulatorEnvironment(target)) {
+    // Set the simulator environment.
+    target.setEnvironment(llvm::Triple::EnvironmentType::Simulator);
+
+    auto newTargetTriple = target.normalize();
+    Diags.diagnose(SourceLoc(), diag::warning_inferred_simulator_target,
+                   DefaultTargetTriple, newTargetTriple);
+
+    DefaultTargetTriple = newTargetTriple;
+  }
 
   switch (target.getOS()) {
-  case llvm::Triple::Darwin:
-  case llvm::Triple::MacOSX:
   case llvm::Triple::IOS:
   case llvm::Triple::TvOS:
-  case llvm::Triple::WatchOS: {
+  case llvm::Triple::WatchOS:
+  case llvm::Triple::Darwin:
+  case llvm::Triple::MacOSX: {
     Optional<llvm::Triple> targetVariant;
     if (const Arg *A = ArgList.getLastArg(options::OPT_target_variant))
       targetVariant = llvm::Triple(llvm::Triple::normalize(A->getValue()));
@@ -885,6 +900,10 @@ Driver::buildCompilation(const ToolChain &TC,
   assert(OI.CompilerOutputType != file_types::ID::TY_INVALID &&
          "buildOutputInfo() must set a valid output type!");
 
+  TC.validateOutputInfo(Diags, OI);
+  if (Diags.hadAnyError())
+    return nullptr;
+
   validateEmbedBitcode(*TranslatedArgList, OI, Diags);
 
   if (OI.CompilerMode == OutputInfo::Mode::REPL)
@@ -990,13 +1009,6 @@ Driver::buildCompilation(const ToolChain &TC,
         ArgList->hasFlag(options::OPT_enable_only_one_dependency_file,
                          options::OPT_disable_only_one_dependency_file, false);
 
-    // relies on the new dependency graph
-    // Get the default from the initializer in LangOptions.
-    const bool EnableFineGrainedDependencies =
-        ArgList->hasFlag(options::OPT_enable_fine_grained_dependencies,
-                         options::OPT_disable_fine_grained_dependencies,
-                         LangOptions().EnableFineGrainedDependencies);
-
     const bool EnableTypeFingerprints =
         ArgList->hasFlag(options::OPT_enable_type_fingerprints,
                          options::OPT_disable_type_fingerprints,
@@ -1032,7 +1044,6 @@ Driver::buildCompilation(const ToolChain &TC,
         ShowDriverTimeCompilation,
         std::move(StatsReporter),
         OnlyOneDependencyFile,
-        EnableFineGrainedDependencies,
         EnableTypeFingerprints,
         VerifyFineGrainedDependencyGraphAfterEveryImport,
         EmitFineGrainedDependencyDotFileAfterEveryImport,
@@ -1520,6 +1531,14 @@ void Driver::buildOutputInfo(const ToolChain &TC, const DerivedArgList &Args,
       OI.CompilerMode = OutputInfo::Mode::SingleCompile;
       break;
 
+    case options::OPT_scan_dependencies:
+      OI.CompilerOutputType = file_types::TY_JSONDependencies;
+      // We want the imported modules from the module as a whole, not individual
+      // files, so let's do it in one invocation rather than having to collate
+      // later.
+      OI.CompilerMode = OutputInfo::Mode::SingleCompile;
+      break;
+
     case options::OPT_index_file:
       OI.CompilerMode = OutputInfo::Mode::SingleCompile;
       OI.CompilerOutputType = file_types::TY_IndexData;
@@ -1972,6 +1991,7 @@ void Driver::buildActions(SmallVectorImpl<const Action *> &TopLevelActions,
       case file_types::TY_PrivateSwiftModuleInterfaceFile:
       case file_types::TY_SwiftCrossImportDir:
       case file_types::TY_SwiftOverlayFile:
+      case file_types::TY_JSONDependencies:
         // We could in theory handle assembly or LLVM input, but let's not.
         // FIXME: What about LTO?
         Diags.diagnose(SourceLoc(), diag::error_unexpected_input_file,
@@ -2109,11 +2129,21 @@ void Driver::buildActions(SmallVectorImpl<const Action *> &TopLevelActions,
     // On ELF platforms there's no built in autolinking mechanism, so we
     // pull the info we need from the .o files directly and pass them as an
     // argument input file to the linker.
+    const auto &Triple = TC.getTriple();
     SmallVector<const Action *, 2> AutolinkExtractInputs;
     for (const Action *A : AllLinkerInputs)
-      if (A->getType() == file_types::TY_Object)
+      if (A->getType() == file_types::TY_Object) {
+        // Shared objects on ELF platforms don't have a swift1_autolink_entries
+        // section in them because the section in the .o files is marked as
+        // SHF_EXCLUDE.
+        if (auto *IA = dyn_cast<InputAction>(A)) {
+          StringRef ObjectName = IA->getInputArg().getValue();
+          if (Triple.getObjectFormat() == llvm::Triple::ELF &&
+              ObjectName.endswith(".so"))
+            continue;
+        }
         AutolinkExtractInputs.push_back(A);
-    const auto &Triple = TC.getTriple();
+      }
     const bool AutolinkExtractRequired =
         (Triple.getObjectFormat() == llvm::Triple::ELF && !Triple.isPS4()) ||
         Triple.getObjectFormat() == llvm::Triple::Wasm ||
@@ -2832,15 +2862,16 @@ Job *Driver::buildJobsForAction(Compilation &C, const JobAction *JA,
       << "\" - \"" << llvm::sys::path::filename(J->getExecutable())
       << "\", inputs: [";
 
-    interleave(InputActions.begin(), InputActions.end(),
-               [](const Action *A) {
-                 auto Input = cast<InputAction>(A);
-                 llvm::outs() << '"' << Input->getInputArg().getValue() << '"';
-               },
-               [] { llvm::outs() << ", "; });
+    llvm::interleave(
+        InputActions.begin(), InputActions.end(),
+        [](const Action *A) {
+          auto Input = cast<InputAction>(A);
+          llvm::outs() << '"' << Input->getInputArg().getValue() << '"';
+        },
+        [] { llvm::outs() << ", "; });
     if (!InputActions.empty() && !J->getInputs().empty())
       llvm::outs() << ", ";
-    interleave(
+    llvm::interleave(
         J->getInputs().begin(), J->getInputs().end(),
         [](const Job *Input) {
           auto FileNames = Input->getOutput().getPrimaryOutputFilenames();
@@ -3293,9 +3324,10 @@ static unsigned printActions(const Action *A,
     os << "\"" << IA->getInputArg().getValue() << "\"";
   } else {
     os << "{";
-    interleave(*cast<JobAction>(A),
-               [&](const Action *Input) { os << printActions(Input, Ids); },
-               [&] { os << ", "; });
+    llvm::interleave(
+        *cast<JobAction>(A),
+        [&](const Action *Input) { os << printActions(Input, Ids); },
+        [&] { os << ", "; });
     os << "}";
   }
 

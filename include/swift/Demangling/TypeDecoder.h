@@ -23,6 +23,7 @@
 #include "swift/Basic/LLVM.h"
 #include "swift/Runtime/Unreachable.h"
 #include "swift/Strings.h"
+#include "llvm/ADT/ArrayRef.h"
 #include <vector>
 
 namespace swift {
@@ -88,15 +89,31 @@ enum class ImplParameterConvention {
   Direct_Guaranteed,
 };
 
+enum class ImplParameterDifferentiability {
+  DifferentiableOrNotApplicable,
+  NotDifferentiable
+};
+
+static inline Optional<ImplParameterDifferentiability>
+getDifferentiabilityFromString(StringRef string) {
+  if (string.empty())
+    return ImplParameterDifferentiability::DifferentiableOrNotApplicable;
+  if (string == "@noDerivative")
+    return ImplParameterDifferentiability::NotDifferentiable;
+  return None;
+}
+
 /// Describe a lowered function parameter, parameterized on the type
 /// representation.
 template <typename BuiltType>
 class ImplFunctionParam {
   ImplParameterConvention Convention;
+  ImplParameterDifferentiability Differentiability;
   BuiltType Type;
 
 public:
   using ConventionType = ImplParameterConvention;
+  using DifferentiabilityType = ImplParameterDifferentiability;
 
   static Optional<ConventionType>
   getConventionFromString(StringRef conventionString) {
@@ -120,10 +137,15 @@ public:
     return None;
   }
 
-  ImplFunctionParam(ImplParameterConvention convention, BuiltType type)
-      : Convention(convention), Type(type) {}
+  ImplFunctionParam(ImplParameterConvention convention,
+                    ImplParameterDifferentiability diffKind, BuiltType type)
+      : Convention(convention), Differentiability(diffKind), Type(type) {}
 
   ImplParameterConvention getConvention() const { return Convention; }
+
+  ImplParameterDifferentiability getDifferentiability() const {
+    return Differentiability;
+  }
 
   BuiltType getType() const { return Type; }
 };
@@ -181,33 +203,53 @@ enum class ImplFunctionRepresentation {
   Closure
 };
 
+enum class ImplFunctionDifferentiabilityKind {
+  NonDifferentiable,
+  Normal,
+  Linear
+};
+
 class ImplFunctionTypeFlags {
   unsigned Rep : 3;
   unsigned Pseudogeneric : 1;
   unsigned Escaping : 1;
+  unsigned DifferentiabilityKind : 2;
 
 public:
-  ImplFunctionTypeFlags() : Rep(0), Pseudogeneric(0), Escaping(0) {}
+  ImplFunctionTypeFlags()
+      : Rep(0), Pseudogeneric(0), Escaping(0), DifferentiabilityKind(0) {}
 
-  ImplFunctionTypeFlags(ImplFunctionRepresentation rep,
-                        bool pseudogeneric, bool noescape)
-      : Rep(unsigned(rep)), Pseudogeneric(pseudogeneric), Escaping(noescape) {}
+  ImplFunctionTypeFlags(ImplFunctionRepresentation rep, bool pseudogeneric,
+                        bool noescape,
+                        ImplFunctionDifferentiabilityKind diffKind)
+      : Rep(unsigned(rep)), Pseudogeneric(pseudogeneric), Escaping(noescape),
+        DifferentiabilityKind(unsigned(diffKind)) {}
 
   ImplFunctionTypeFlags
   withRepresentation(ImplFunctionRepresentation rep) const {
-    return ImplFunctionTypeFlags(rep, Pseudogeneric, Escaping);
+    return ImplFunctionTypeFlags(
+        rep, Pseudogeneric, Escaping,
+        ImplFunctionDifferentiabilityKind(DifferentiabilityKind));
   }
 
   ImplFunctionTypeFlags
   withEscaping() const {
-    return ImplFunctionTypeFlags(ImplFunctionRepresentation(Rep),
-                                 Pseudogeneric, true);
+    return ImplFunctionTypeFlags(
+        ImplFunctionRepresentation(Rep), Pseudogeneric, true,
+        ImplFunctionDifferentiabilityKind(DifferentiabilityKind));
   }
   
   ImplFunctionTypeFlags
   withPseudogeneric() const {
-    return ImplFunctionTypeFlags(ImplFunctionRepresentation(Rep),
-                                 true, Escaping);
+    return ImplFunctionTypeFlags(
+        ImplFunctionRepresentation(Rep), true, Escaping,
+        ImplFunctionDifferentiabilityKind(DifferentiabilityKind));
+  }
+
+  ImplFunctionTypeFlags
+  withDifferentiabilityKind(ImplFunctionDifferentiabilityKind diffKind) const {
+    return ImplFunctionTypeFlags(ImplFunctionRepresentation(Rep), Pseudogeneric,
+                                 Escaping, diffKind);
   }
 
   ImplFunctionRepresentation getRepresentation() const {
@@ -217,6 +259,10 @@ public:
   bool isEscaping() const { return Escaping; }
 
   bool isPseudogeneric() const { return Pseudogeneric; }
+
+  ImplFunctionDifferentiabilityKind getDifferentiabilityKind() const {
+    return ImplFunctionDifferentiabilityKind(DifferentiabilityKind);
+  }
 };
 
 #if SWIFT_OBJC_INTEROP
@@ -494,6 +540,10 @@ class TypeDecoder {
     case NodeKind::NoEscapeFunctionType:
     case NodeKind::AutoClosureType:
     case NodeKind::EscapingAutoClosureType:
+    case NodeKind::DifferentiableFunctionType:
+    case NodeKind::EscapingDifferentiableFunctionType:
+    case NodeKind::LinearFunctionType:
+    case NodeKind::EscapingLinearFunctionType:
     case NodeKind::FunctionType: {
       if (Node->getNumChildren() < 2)
         return BuiltType();
@@ -507,6 +557,15 @@ class TypeDecoder {
           flags.withConvention(FunctionMetadataConvention::CFunctionPointer);
       } else if (Node->getKind() == NodeKind::ThinFunctionType) {
         flags = flags.withConvention(FunctionMetadataConvention::Thin);
+      } else if (Node->getKind() == NodeKind::DifferentiableFunctionType ||
+               Node->getKind() ==
+                   NodeKind::EscapingDifferentiableFunctionType) {
+        flags = flags.withDifferentiabilityKind(
+            FunctionMetadataDifferentiabilityKind::Normal);
+      } else if (Node->getKind() == NodeKind::LinearFunctionType ||
+                 Node->getKind() == NodeKind::EscapingLinearFunctionType) {
+        flags = flags.withDifferentiabilityKind(
+            FunctionMetadataDifferentiabilityKind::Linear);
       }
 
       bool isThrow =
@@ -527,7 +586,11 @@ class TypeDecoder {
               .withEscaping(
                           Node->getKind() == NodeKind::FunctionType ||
                           Node->getKind() == NodeKind::EscapingAutoClosureType ||
-                          Node->getKind() == NodeKind::EscapingObjCBlock);
+                          Node->getKind() == NodeKind::EscapingObjCBlock ||
+                          Node->getKind() ==
+                              NodeKind::EscapingDifferentiableFunctionType ||
+                          Node->getKind() ==
+                              NodeKind::EscapingLinearFunctionType);
 
       auto result = decodeMangledType(Node->getChild(isThrow ? 2 : 1));
       if (!result) return BuiltType();
@@ -565,10 +628,16 @@ class TypeDecoder {
             flags =
               flags.withRepresentation(ImplFunctionRepresentation::Block);
           }
+        } else if (child->getKind() == NodeKind::ImplDifferentiable) {
+          flags = flags.withDifferentiabilityKind(
+              ImplFunctionDifferentiabilityKind::Normal);
+        } else if (child->getKind() == NodeKind::ImplLinear) {
+          flags = flags.withDifferentiabilityKind(
+              ImplFunctionDifferentiabilityKind::Linear);
         } else if (child->getKind() == NodeKind::ImplEscaping) {
           flags = flags.withEscaping();
         } else if (child->getKind() == NodeKind::ImplParameter) {
-          if (decodeImplFunctionPart(child, parameters))
+          if (decodeImplFunctionParam(child, parameters))
             return BuiltType();
         } else if (child->getKind() == NodeKind::ImplResult) {
           if (decodeImplFunctionPart(child, results))
@@ -808,7 +877,7 @@ class TypeDecoder {
         }
       }
       genericArgsLevels.push_back(genericArgsBuf.size());
-      std::vector<ArrayRef<BuiltType>> genericArgs;
+      std::vector<llvm::ArrayRef<BuiltType>> genericArgs;
       for (unsigned i = 0; i < genericArgsLevels.size() - 1; ++i) {
         auto start = genericArgsLevels[i], end = genericArgsLevels[i+1];
         genericArgs.emplace_back(genericArgsBuf.data() + start,
@@ -827,7 +896,7 @@ class TypeDecoder {
 private:
   template <typename T>
   bool decodeImplFunctionPart(Demangle::NodePointer node,
-                              SmallVectorImpl<T> &results) {
+                              llvm::SmallVectorImpl<T> &results) {
     if (node->getNumChildren() != 2)
       return true;
     
@@ -845,6 +914,45 @@ private:
       return true;
 
     results.emplace_back(*convention, type);
+    return false;
+  }
+
+  bool decodeImplFunctionParam(
+      Demangle::NodePointer node,
+      llvm::SmallVectorImpl<ImplFunctionParam<BuiltType>> &results) {
+    // Children: `convention, differentiability?, type`
+    if (node->getNumChildren() != 2 && node->getNumChildren() != 3)
+      return true;
+
+    auto *conventionNode = node->getChild(0);
+    auto *typeNode = node->getLastChild();
+    if (conventionNode->getKind() != Node::Kind::ImplConvention ||
+        typeNode->getKind() != Node::Kind::Type)
+      return true;
+
+    StringRef conventionString = conventionNode->getText();
+    auto convention =
+        ImplFunctionParam<BuiltType>::getConventionFromString(conventionString);
+    if (!convention)
+      return true;
+    BuiltType type = decodeMangledType(typeNode);
+    if (!type)
+      return true;
+
+    auto diffKind =
+        ImplParameterDifferentiability::DifferentiableOrNotApplicable;
+    if (node->getNumChildren() == 3) {
+      auto diffKindNode = node->getChild(1);
+      if (diffKindNode->getKind() != Node::Kind::ImplDifferentiability)
+        return true;
+      auto optDiffKind =
+          getDifferentiabilityFromString(diffKindNode->getText());
+      if (!optDiffKind)
+        return true;
+      diffKind = *optDiffKind;
+    }
+
+    results.emplace_back(*convention, diffKind, type);
     return false;
   }
 
@@ -913,7 +1021,7 @@ private:
 
   bool decodeMangledFunctionInputType(
       Demangle::NodePointer node,
-      SmallVectorImpl<FunctionParam<BuiltType>> &params,
+      llvm::SmallVectorImpl<FunctionParam<BuiltType>> &params,
       bool &hasParamFlags) {
     // Look through a couple of sugar nodes.
     if (node->getKind() == NodeKind::Type ||

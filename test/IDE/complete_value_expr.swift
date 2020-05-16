@@ -200,6 +200,7 @@
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=IN_DICTIONARY_LITERAL_1 | %FileCheck %s -check-prefix=SIMPLE_OBJECT_DOT
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=IN_DICTIONARY_LITERAL_2 | %FileCheck %s -check-prefix=SIMPLE_OBJECT_DOT
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=COMPLETE_CALL_RESULT | %FileCheck %s -check-prefix=COMPLETE_CALL_RESULT
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-keywords=false -code-completion-token=BROKEN_CONFORMANCE | %FileCheck %s -check-prefix=BROKEN_CONFORMANCE
 
 // Test code completion of expressions that produce a value.
 
@@ -1417,12 +1418,12 @@ func testTypeCheckNil() {
 func testResolveModules1() {
   Swift#^RESOLVE_MODULES_1^#
 // RESOLVE_MODULES_1: Begin completions
-// RESOLVE_MODULES_1-DAG: Decl[Struct]/OtherModule[Swift]:    .Int8[#Int8#]{{; name=.+$}}
-// RESOLVE_MODULES_1-DAG: Decl[Struct]/OtherModule[Swift]:    .Int16[#Int16#]{{; name=.+$}}
-// RESOLVE_MODULES_1-DAG: Decl[Struct]/OtherModule[Swift]:    .Int32[#Int32#]{{; name=.+$}}
-// RESOLVE_MODULES_1-DAG: Decl[Struct]/OtherModule[Swift]:    .Int64[#Int64#]{{; name=.+$}}
-// RESOLVE_MODULES_1-DAG: Decl[Struct]/OtherModule[Swift]:    .Bool[#Bool#]{{; name=.+$}}
-// RESOLVE_MODULES_1-DAG: Decl[TypeAlias]/OtherModule[Swift]: .Float32[#Float#]{{; name=.+$}}
+// RESOLVE_MODULES_1-DAG: Decl[Struct]/OtherModule[Swift]/IsSystem: .Int8[#Int8#]{{; name=.+$}}
+// RESOLVE_MODULES_1-DAG: Decl[Struct]/OtherModule[Swift]/IsSystem: .Int16[#Int16#]{{; name=.+$}}
+// RESOLVE_MODULES_1-DAG: Decl[Struct]/OtherModule[Swift]/IsSystem: .Int32[#Int32#]{{; name=.+$}}
+// RESOLVE_MODULES_1-DAG: Decl[Struct]/OtherModule[Swift]/IsSystem: .Int64[#Int64#]{{; name=.+$}}
+// RESOLVE_MODULES_1-DAG: Decl[Struct]/OtherModule[Swift]/IsSystem: .Bool[#Bool#]{{; name=.+$}}
+// RESOLVE_MODULES_1-DAG: Decl[TypeAlias]/OtherModule[Swift]/IsSystem: .Float32[#Float#]{{; name=.+$}}
 // RESOLVE_MODULES_1: End completions
 }
 
@@ -1435,11 +1436,11 @@ func testInterpolatedString1() {
 // FOO_OBJECT_DOT1: Begin completions
 // FOO_OBJECT_DOT1-DAG: Decl[InstanceVar]/CurrNominal/TypeRelation[Convertible]:      lazyInstanceVar[#Int#]{{; name=.+$}}
 // FOO_OBJECT_DOT1-DAG: Decl[InstanceVar]/CurrNominal/TypeRelation[Convertible]:      instanceVar[#Int#]{{; name=.+$}}
-// FOO_OBJECT_DOT1-DAG: Decl[InstanceMethod]/CurrNominal/NotRecommended/TypeRelation[Invalid]: instanceFunc0()[#Void#]{{; name=.+$}}
-// FOO_OBJECT_DOT1-DAG: Decl[InstanceMethod]/CurrNominal/NotRecommended/TypeRelation[Invalid]: instanceFunc1({#(a): Int#})[#Void#]{{; name=.+$}}
-// FOO_OBJECT_DOT1-DAG: Decl[InstanceMethod]/CurrNominal/NotRecommended/TypeRelation[Invalid]: instanceFunc2({#(a): Int#}, {#b: &Double#})[#Void#]{{; name=.+$}}
-// FOO_OBJECT_DOT1-DAG: Decl[InstanceMethod]/CurrNominal/NotRecommended/TypeRelation[Invalid]: instanceFunc3({#(a): Int#}, {#(Float, Double)#})[#Void#]{{; name=.+$}}
-// FOO_OBJECT_DOT1-DAG: Decl[InstanceMethod]/CurrNominal/NotRecommended/TypeRelation[Invalid]: instanceFunc4({#(a): Int?#}, {#b: Int!#}, {#c: &Int?#}, {#d: &Int!#})[#Void#]{{; name=.+$}}
+// FOO_OBJECT_DOT1-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Invalid]: instanceFunc0()[#Void#]{{; name=.+$}}
+// FOO_OBJECT_DOT1-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Invalid]: instanceFunc1({#(a): Int#})[#Void#]{{; name=.+$}}
+// FOO_OBJECT_DOT1-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Invalid]: instanceFunc2({#(a): Int#}, {#b: &Double#})[#Void#]{{; name=.+$}}
+// FOO_OBJECT_DOT1-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Invalid]: instanceFunc3({#(a): Int#}, {#(Float, Double)#})[#Void#]{{; name=.+$}}
+// FOO_OBJECT_DOT1-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Invalid]: instanceFunc4({#(a): Int?#}, {#b: Int!#}, {#c: &Int?#}, {#d: &Int!#})[#Void#]{{; name=.+$}}
 // FOO_OBJECT_DOT1-DAG: Decl[InstanceMethod]/CurrNominal:   instanceFunc5()[#Int?#]{{; name=.+$}}
 // FOO_OBJECT_DOT1-DAG: Decl[InstanceMethod]/CurrNominal:   instanceFunc6()[#Int!#]{{; name=.+$}}
 
@@ -2044,7 +2045,7 @@ class TestDotExprWithNonNominal {
 // DOT_EXPR_NON_NOMINAL_2-NOT: otherField
 // DOT_EXPR_NON_NOMINAL_2-NOT: firstName
 // DOT_EXPR_NON_NOMINAL_2: Keyword[self]/CurrNominal:          self[#Int#]; name=self
-// DOT_EXPR_NON_NOMINAL_2: Decl[InstanceVar]/CurrNominal:      hashValue[#Int#];
+// DOT_EXPR_NON_NOMINAL_2: Decl[InstanceVar]/CurrNominal/IsSystem: hashValue[#Int#];
 // DOT_EXPR_NON_NOMINAL_2-NOT: otherField
 // DOT_EXPR_NON_NOMINAL_2-NOT: firstName
   }
@@ -2184,4 +2185,20 @@ func testWrapSuccess(promise: Int, seal: Resolver<Void>) {
   // COMPLETE_CALL_RESULT: Begin completions
   // COMPLETE_CALL_RESULT: Pattern/CurrModule:                 ({#Void#}, {#Bool#})[#Void#]; name=(Void, Bool)
   // COMPLETE_CALL_RESULT: End completions
+}
+
+protocol BrokenConformanceP {
+  static func staticFunc()
+  func instanceFunc()
+}
+extension BrokenConformanceP {
+  static func staticFuncExtension() {}
+}
+struct BrokenConformanceS: BrokenConformanceP {
+}
+func testBrokenConformance(arg: BrokenConformanceS) {
+  arg.#^BROKEN_CONFORMANCE^#
+  // BROKEN_CONFORMANCE: Begin completions, 1 items
+  // BROKEN_CONFORMANCE: Decl[InstanceMethod]/Super: instanceFunc()[#Void#];
+  // BROKEN_CONFORMANCE: End completions
 }

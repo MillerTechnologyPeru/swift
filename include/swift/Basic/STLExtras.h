@@ -71,40 +71,6 @@ struct function_traits<R (T::*)(Args...) const> {
 
 /// @{
 
-/// An STL-style algorithm similar to std::for_each that applies a second
-/// functor between every pair of elements.
-///
-/// This provides the control flow logic to, for example, print a
-/// comma-separated list:
-/// \code
-///   interleave(names.begin(), names.end(),
-///              [&](StringRef name) { OS << name; },
-///              [&] { OS << ", "; });
-/// \endcode
-template <typename ForwardIterator, typename UnaryFunctor,
-          typename NullaryFunctor>
-inline void interleave(ForwardIterator begin, ForwardIterator end,
-                       UnaryFunctor each_fn,
-                       NullaryFunctor between_fn) {
-  if (begin == end)
-    return;
-  each_fn(*begin);
-  ++begin;
-  for (; begin != end; ++begin) {
-    between_fn();
-    each_fn(*begin);
-  }
-}
-
-template <typename Container, typename UnaryFunctor, typename NullaryFunctor>
-inline void interleave(const Container &c, UnaryFunctor each_fn,
-                       NullaryFunctor between_fn) {
-  interleave(c.begin(), c.end(), each_fn, between_fn);
-}
-
-/// @}
-/// @{
-
 /// The equivalent of std::for_each, but for two lists at once.
 template <typename InputIt1, typename InputIt2, typename BinaryFunction>
 inline void for_each(InputIt1 I1, InputIt1 E1, InputIt2 I2, BinaryFunction f) {

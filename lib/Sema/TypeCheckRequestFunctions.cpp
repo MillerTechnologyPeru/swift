@@ -24,7 +24,7 @@
 
 using namespace swift;
 
-llvm::Expected<Type>
+Type
 InheritedTypeRequest::evaluate(
     Evaluator &evaluator, llvm::PointerUnion<TypeDecl *, ExtensionDecl *> decl,
     unsigned index,
@@ -49,11 +49,11 @@ InheritedTypeRequest::evaluate(
   Optional<TypeResolution> resolution;
   switch (stage) {
   case TypeResolutionStage::Structural:
-    resolution = TypeResolution::forStructural(dc);
+    resolution = TypeResolution::forStructural(dc, options);
     break;
 
   case TypeResolutionStage::Interface:
-    resolution = TypeResolution::forInterface(dc);
+    resolution = TypeResolution::forInterface(dc, options);
     break;
 
   case TypeResolutionStage::Contextual: {
@@ -62,7 +62,7 @@ InheritedTypeRequest::evaluate(
       evaluator(InheritedTypeRequest{decl, index,
                                      TypeResolutionStage::Interface});
     if (!result)
-      return result;
+      return Type();
 
     return dc->mapTypeIntoContext(*result);
   }
@@ -72,14 +72,14 @@ InheritedTypeRequest::evaluate(
 
   Type inheritedType;
   if (typeLoc.getTypeRepr())
-    inheritedType = resolution->resolveType(typeLoc.getTypeRepr(), options);
+    inheritedType = resolution->resolveType(typeLoc.getTypeRepr());
   else
     inheritedType = typeLoc.getType();
 
   return inheritedType ? inheritedType : ErrorType::get(dc->getASTContext());
 }
 
-llvm::Expected<Type>
+Type
 SuperclassTypeRequest::evaluate(Evaluator &evaluator,
                                 NominalTypeDecl *nominalDecl,
                                 TypeResolutionStage stage) const {
@@ -129,7 +129,7 @@ SuperclassTypeRequest::evaluate(Evaluator &evaluator,
   return Type();
 }
 
-llvm::Expected<Type>
+Type
 EnumRawTypeRequest::evaluate(Evaluator &evaluator, EnumDecl *enumDecl,
                              TypeResolutionStage stage) const {
   for (unsigned int idx : indices(enumDecl->getInherited())) {
@@ -158,7 +158,7 @@ EnumRawTypeRequest::evaluate(Evaluator &evaluator, EnumDecl *enumDecl,
   return Type();
 }
 
-llvm::Expected<CustomAttr *>
+CustomAttr *
 AttachedFunctionBuilderRequest::evaluate(Evaluator &evaluator,
                                          ValueDecl *decl) const {
   ASTContext &ctx = decl->getASTContext();
@@ -182,9 +182,8 @@ AttachedFunctionBuilderRequest::evaluate(Evaluator &evaluator,
   return nullptr;
 }
 
-llvm::Expected<Type>
-FunctionBuilderTypeRequest::evaluate(Evaluator &evaluator,
-                                     ValueDecl *decl) const {
+Type FunctionBuilderTypeRequest::evaluate(Evaluator &evaluator,
+                                          ValueDecl *decl) const {
   // Look for a function-builder custom attribute.
   auto attr = decl->getAttachedFunctionBuilder();
   if (!attr) return Type();
@@ -214,7 +213,7 @@ FunctionBuilderTypeRequest::evaluate(Evaluator &evaluator,
     if (!paramFnType) {
       ctx.Diags.diagnose(attr->getLocation(),
                          diag::function_builder_parameter_not_of_function_type,
-                         nominal->getFullName());
+                         nominal->getName());
       mutableAttr->setInvalid();
       return Type();
     }
@@ -223,7 +222,7 @@ FunctionBuilderTypeRequest::evaluate(Evaluator &evaluator,
     if (param->isAutoClosure()) {
       ctx.Diags.diagnose(attr->getLocation(),
                          diag::function_builder_parameter_autoclosure,
-                         nominal->getFullName());
+                         nominal->getName());
       mutableAttr->setInvalid();
       return Type();
     }

@@ -14,6 +14,7 @@
 #define SWIFT_AST_SOURCEFILE_H
 
 #include "swift/AST/FileUnit.h"
+#include "swift/AST/SynthesizedFileUnit.h"
 #include "swift/Basic/Debug.h"
 
 namespace swift {
@@ -23,22 +24,14 @@ class PersistentParserState;
 /// A file containing Swift source code.
 ///
 /// This is a .swift or .sil file (or a virtual file, such as the contents of
-/// the REPL). Since it contains raw source, it must be parsed and name-bound
-/// before being used for anything; a full type-check is also necessary for
-/// IR generation.
+/// the REPL). Since it contains raw source, it must be type checked for IR
+/// generation.
 class SourceFile final : public FileUnit {
   friend class ParseSourceFileRequest;
 
 public:
   class Impl;
   struct SourceFileSyntaxInfo;
-
-  /// The implicit module import that the SourceFile should get.
-  enum class ImplicitModuleImportKind {
-    None,
-    Builtin,
-    Stdlib
-  };
 
   /// Possible attributes for imports in source files.
   enum class ImportFlags {
@@ -128,13 +121,16 @@ private:
 
   /// This is the list of modules that are imported by this module.
   ///
-  /// This is filled in by the Name Binding phase.
-  ArrayRef<ImportedModuleDesc> Imports;
+  /// This is \c None until it is filled in by the import resolution phase.
+  Optional<ArrayRef<ImportedModuleDesc>> Imports;
 
   /// A unique identifier representing this file; used to mark private decls
   /// within the file to keep them from conflicting with other files in the
   /// same module.
   mutable Identifier PrivateDiscriminator;
+
+  /// A synthesized file corresponding to this file, created on-demand.
+  SynthesizedFileUnit *SynthesizedFile = nullptr;
 
   /// The root TypeRefinementContext for this SourceFile.
   ///
@@ -142,13 +138,14 @@ private:
   TypeRefinementContext *TRC = nullptr;
 
   /// If non-null, used to track name lookups that happen within this file.
-  Optional<ReferencedNameTracker> ReferencedNames;
+  Optional<ReferencedNameTracker> RequestReferencedNames;
 
-  /// The class in this file marked \@NS/UIApplicationMain.
-  ClassDecl *MainClass = nullptr;
+  /// Either the class marked \@NS/UIApplicationMain or the synthesized FuncDecl
+  /// that calls main on the type marked @main.
+  Decl *MainDecl = nullptr;
 
-  /// The source location of the main class.
-  SourceLoc MainClassDiagLoc;
+  /// The source location of the main type.
+  SourceLoc MainDeclDiagLoc;
 
   /// A hash of all interface-contributing tokens that have been lexed for
   /// this source file so far.
@@ -159,10 +156,6 @@ private:
   ///
   /// May be -1, to indicate no association with a buffer.
   int BufferID;
-
-  /// Does this source file have any implementation-only imports?
-  /// If not, we can fast-path module checks.
-  bool HasImplementationOnlyImports = false;
 
   /// The parsing options for the file.
   ParsingOptions ParsingOpts;
@@ -179,7 +172,7 @@ private:
 
   /// The list of top-level declarations in the source file. This is \c None if
   /// they have not yet been parsed.
-  /// FIXME: Once addTopLevelDecl/prependTopLevelDecl/truncateTopLevelDecls
+  /// FIXME: Once addTopLevelDecl/prependTopLevelDecl
   /// have been removed, this can become an optional ArrayRef.
   Optional<std::vector<Decl *>> Decls;
 
@@ -193,16 +186,6 @@ private:
   /// be part of the underlying module. (ClangImporter overlays use a different
   /// mechanism which is not SourceFile-dependent.)
   SeparatelyImportedOverlayMap separatelyImportedOverlays;
-
-  using SeparatelyImportedOverlayReverseMap =
-    llvm::SmallDenseMap<ModuleDecl *, ModuleDecl *>;
-
-  /// A lazily populated mapping from a separately imported overlay to its
-  /// underlying shadowed module.
-  ///
-  /// This is used by tooling to substitute the name of the underlying module
-  /// wherever the overlay's name would otherwise be reported.
-  SeparatelyImportedOverlayReverseMap separatelyImportedOverlaysReversed;
 
   /// A pointer to PersistentParserState with a function reference to its
   /// deleter to handle the fact that it's forward declared.
@@ -249,15 +232,6 @@ public:
     return llvm::makeArrayRef(*Decls);
   }
 
-  /// Truncates the list of top-level decls so it contains \c count elements. Do
-  /// not add any additional uses of this function.
-  void truncateTopLevelDecls(unsigned count) {
-    // Force decl parsing if we haven't already.
-    (void)getTopLevelDecls();
-    assert(count <= Decls->size() && "Can only truncate top-level decls!");
-    Decls->resize(count);
-  }
-
   /// Retrieve the parsing options for the file.
   ParsingOptions getParsingOptions() const { return ParsingOpts; }
 
@@ -267,12 +241,6 @@ public:
 
   /// The list of local type declarations in the source file.
   llvm::SetVector<TypeDecl *> LocalTypeDecls;
-
-  /// A set of special declaration attributes which require the
-  /// Foundation module to be imported to work. If the foundation
-  /// module is still not imported by the time type checking is
-  /// complete, we diagnose.
-  llvm::SetVector<const DeclAttribute *> AttrsRequiringFoundation;
 
   /// A set of synthesized declarations that need to be type checked.
   llvm::SmallVector<Decl *, 8> SynthesizedDecls;
@@ -311,23 +279,15 @@ public:
   /// List of Objective-C member conflicts we have found during type checking.
   std::vector<ObjCMethodConflict> ObjCMethodConflicts;
 
-  template <typename T>
-  using OperatorMap = llvm::DenseMap<Identifier,llvm::PointerIntPair<T,1,bool>>;
-
-  OperatorMap<InfixOperatorDecl*> InfixOperators;
-  OperatorMap<PostfixOperatorDecl*> PostfixOperators;
-  OperatorMap<PrefixOperatorDecl*> PrefixOperators;
-  OperatorMap<PrecedenceGroupDecl*> PrecedenceGroups;
-
   /// Describes what kind of file this is, which can affect some type checking
   /// and other behavior.
   const SourceFileKind Kind;
 
   enum ASTStage_t {
-    /// The source file is not name bound or type checked.
+    /// The source file has not had its imports resolved or been type checked.
     Unprocessed,
-    /// Name binding has completed.
-    NameBound,
+    /// Import resolution has completed.
+    ImportsResolved,
     /// Type checking has completed.
     TypeChecked
   };
@@ -349,12 +309,17 @@ public:
   llvm::StringMap<SourceFilePathInfo> getInfoForUsedFilePaths() const;
 
   SourceFile(ModuleDecl &M, SourceFileKind K, Optional<unsigned> bufferID,
-             ImplicitModuleImportKind ModImpKind, bool KeepParsedTokens = false,
-             bool KeepSyntaxTree = false, ParsingOptions parsingOpts = {});
+             bool KeepParsedTokens = false, bool KeepSyntaxTree = false,
+             ParsingOptions parsingOpts = {});
 
   ~SourceFile();
 
-  void addImports(ArrayRef<ImportedModuleDesc> IM);
+  /// Retrieve an immutable view of the source file's imports.
+  ArrayRef<ImportedModuleDesc> getImports() const { return *Imports; }
+
+  /// Set the imports for this source file. This gets called by import
+  /// resolution.
+  void setImports(ArrayRef<ImportedModuleDesc> imports);
 
   enum ImportQueryKind {
     /// Return the results for testable or private imports.
@@ -369,9 +334,9 @@ public:
   hasTestableOrPrivateImport(AccessLevel accessLevel, const ValueDecl *ofDecl,
                              ImportQueryKind kind = TestableAndPrivate) const;
 
-  bool hasImplementationOnlyImports() const {
-    return HasImplementationOnlyImports;
-  }
+  /// Does this source file have any implementation-only imports?
+  /// If not, we can fast-path module checks.
+  bool hasImplementationOnlyImports() const;
 
   bool isImportedImplementationOnly(const ModuleDecl *module) const;
 
@@ -392,7 +357,6 @@ public:
   /// \returns true if the overlay was added; false if it already existed.
   bool addSeparatelyImportedOverlay(ModuleDecl *overlay,
                                     ModuleDecl *declaring) {
-    separatelyImportedOverlaysReversed.clear();
     return std::get<1>(separatelyImportedOverlays[declaring].insert(overlay));
   }
 
@@ -410,11 +374,7 @@ public:
     overlays.append(value.begin(), value.end());
   }
 
-  /// Retrieves a module shadowed by the provided separately imported overlay
-  /// \p shadowed. If such a module is returned, it should be presented to users
-  /// as owning the symbols in \p overlay.
-  ModuleDecl *
-  getModuleShadowedBySeparatelyImportedOverlay(const ModuleDecl *overlay);
+  SWIFT_DEBUG_DUMPER(dumpSeparatelyImportedOverlays());
 
   void cacheVisibleDecls(SmallVectorImpl<ValueDecl *> &&globals) const;
   const SmallVectorImpl<ValueDecl *> &getCachedVisibleDecls() const;
@@ -436,7 +396,20 @@ public:
          ObjCSelector selector,
          SmallVectorImpl<AbstractFunctionDecl *> &results) const override;
 
+protected:
+  virtual void
+  lookupOperatorDirect(Identifier name, OperatorFixity fixity,
+                       TinyPtrVector<OperatorDecl *> &results) const override;
+
+  virtual void lookupPrecedenceGroupDirect(
+      Identifier name,
+      TinyPtrVector<PrecedenceGroupDecl *> &results) const override;
+
+public:
   virtual void getTopLevelDecls(SmallVectorImpl<Decl*> &results) const override;
+
+  virtual void
+  getOperatorDecls(SmallVectorImpl<OperatorDecl *> &results) const override;
 
   virtual void
   getPrecedenceGroups(SmallVectorImpl<PrecedenceGroupDecl*> &results) const override;
@@ -459,35 +432,31 @@ public:
   Identifier getPrivateDiscriminator() const { return PrivateDiscriminator; }
   Optional<BasicDeclLocs> getBasicLocsForDecl(const Decl *D) const override;
 
+  /// Returns the synthesized file for this source file, if it exists.
+  SynthesizedFileUnit *getSynthesizedFile() const { return SynthesizedFile; };
+
+  SynthesizedFileUnit &getOrCreateSynthesizedFile();
+
   virtual bool walk(ASTWalker &walker) override;
 
-  /// @{
-
-  /// Look up the given operator in this file.
-  ///
-  /// The file must be name-bound already. If the operator is not found, or if
-  /// there is an ambiguity, returns null.
-  ///
-  /// \param isCascading If true, the lookup of this operator may affect
-  /// downstream files.
-  InfixOperatorDecl *lookupInfixOperator(Identifier name, bool isCascading,
-                                         SourceLoc diagLoc = {});
-  PrefixOperatorDecl *lookupPrefixOperator(Identifier name, bool isCascading,
-                                           SourceLoc diagLoc = {});
-  PostfixOperatorDecl *lookupPostfixOperator(Identifier name, bool isCascading,
-                                             SourceLoc diagLoc = {});
-  PrecedenceGroupDecl *lookupPrecedenceGroup(Identifier name, bool isCascading,
-                                             SourceLoc diagLoc = {});
-  /// @}
-
-  ReferencedNameTracker *getReferencedNameTracker() {
-    return ReferencedNames ? ReferencedNames.getPointer() : nullptr;
+  ReferencedNameTracker *getRequestBasedReferencedNameTracker() {
+    return RequestReferencedNames ? RequestReferencedNames.getPointer() : nullptr;
   }
-  const ReferencedNameTracker *getReferencedNameTracker() const {
-    return ReferencedNames ? ReferencedNames.getPointer() : nullptr;
+  const ReferencedNameTracker *getRequestBasedReferencedNameTracker() const {
+    return RequestReferencedNames ? RequestReferencedNames.getPointer() : nullptr;
   }
 
+  /// Creates and installs the referenced name trackers in this source file.
+  ///
+  /// This entrypoint must be called before incremental compilation can proceed,
+  /// else reference dependencies will not be registered.
   void createReferencedNameTracker();
+
+  /// Retrieves the appropriate referenced name tracker instance.
+  ///
+  /// If incremental dependencies tracking is not enabled or \c createReferencedNameTracker()
+  /// has not been invoked on this source file, the result is \c nullptr.
+  const ReferencedNameTracker *getConfiguredReferencedNameTracker() const;
 
   /// The buffer ID for the file that was imported, or None if there
   /// is no associated buffer.
@@ -546,7 +515,6 @@ public:
   bool isScriptMode() const {
     switch (Kind) {
     case SourceFileKind::Main:
-    case SourceFileKind::REPL:
       return true;
 
     case SourceFileKind::Library:
@@ -557,26 +525,28 @@ public:
     llvm_unreachable("bad SourceFileKind");
   }
 
-  ClassDecl *getMainClass() const override {
-    return MainClass;
+  Decl *getMainDecl() const override { return MainDecl; }
+  SourceLoc getMainDeclDiagLoc() const {
+    assert(hasMainDecl());
+    return MainDeclDiagLoc;
   }
   SourceLoc getMainClassDiagLoc() const {
     assert(hasMainClass());
-    return MainClassDiagLoc;
+    return getMainDeclDiagLoc();
   }
 
   /// Register a "main" class for the module, complaining if there is more than
   /// one.
   ///
   /// Should only be called during type-checking.
-  bool registerMainClass(ClassDecl *mainClass, SourceLoc diagLoc);
+  bool registerMainDecl(Decl *mainDecl, SourceLoc diagLoc);
 
   /// True if this source file has an application entry point.
   ///
   /// This is true if the source file either is in script mode or contains
   /// a designated main class.
   bool hasEntryPoint() const override {
-    return isScriptMode() || hasMainClass();
+    return isScriptMode() || hasMainDecl();
   }
 
   /// Get the root refinement context for the file. The root context may be
@@ -624,8 +594,6 @@ public:
   bool shouldBuildSyntaxTree() const;
 
   bool canBeParsedInFull() const;
-
-  bool isSuitableForASTScopes() const { return canBeParsedInFull(); }
 
   /// Whether the bodies of types and functions within this file can be lazily
   /// parsed.
@@ -738,9 +706,11 @@ struct DenseMapInfo<swift::SourceFile::ImportedModuleDesc> {
                               StringRefDMI::getTombstoneKey());
   }
   static inline unsigned getHashValue(const ImportedModuleDesc &import) {
-    return combineHashValue(ImportedModuleDMI::getHashValue(import.module),
-           combineHashValue(ImportOptionsDMI::getHashValue(import.importOptions),
-                            StringRefDMI::getHashValue(import.filename)));
+    return detail::combineHashValue(
+        ImportedModuleDMI::getHashValue(import.module),
+        detail::combineHashValue(
+            ImportOptionsDMI::getHashValue(import.importOptions),
+            StringRefDMI::getHashValue(import.filename)));
   }
   static bool isEqual(const ImportedModuleDesc &a,
                       const ImportedModuleDesc &b) {

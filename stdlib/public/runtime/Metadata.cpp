@@ -16,7 +16,6 @@
 
 #include "swift/Runtime/Metadata.h"
 #include "MetadataCache.h"
-#include "swift/Basic/LLVM.h"
 #include "swift/Basic/Lazy.h"
 #include "swift/Basic/Range.h"
 #include "swift/Demangling/Demangler.h"
@@ -27,8 +26,6 @@
 #include "swift/Runtime/Mutex.h"
 #include "swift/Runtime/Once.h"
 #include "swift/Strings.h"
-#include "llvm/Support/MathExtras.h"
-#include "llvm/Support/PointerLikeTypeTraits.h"
 #include <algorithm>
 #include <cctype>
 #include <cinttypes>
@@ -436,6 +433,18 @@ SWIFT_ALLOWED_RUNTIME_GLOBAL_CTOR_END
 extern "C" void *_objc_empty_cache;
 #endif
 
+template <>
+bool Metadata::isCanonicalStaticallySpecializedGenericMetadata() const {
+  if (auto *metadata = dyn_cast<StructMetadata>(this))
+    return metadata->isCanonicalStaticallySpecializedGenericMetadata();
+  if (auto *metadata = dyn_cast<EnumMetadata>(this))
+    return metadata->isCanonicalStaticallySpecializedGenericMetadata();
+  if (auto *metadata = dyn_cast<ClassMetadata>(this))
+    return metadata->isCanonicalStaticallySpecializedGenericMetadata();
+
+  return false;
+}
+
 static void copyMetadataPattern(void **section,
                                 const GenericMetadataPartialPattern *pattern) {
   memcpy(section + pattern->OffsetInWords,
@@ -605,7 +614,10 @@ initializeValueMetadataFromPattern(ValueMetadata *metadata,
     auto extraDataPattern = pattern->getExtraDataPattern();
 
     // Zero memory up to the offset.
-    memset(metadataExtraData, 0, size_t(extraDataPattern->OffsetInWords));
+    // [pre-5.3-extra-data-zeroing] Before Swift 5.3, the runtime did not
+    // correctly zero the zero-prefix of the extra-data pattern.
+    memset(metadataExtraData, 0,
+           size_t(extraDataPattern->OffsetInWords) * sizeof(void *));
 
     // Copy the pattern into the rest of the extra data.
     copyMetadataPattern(metadataExtraData, extraDataPattern);
@@ -648,6 +660,11 @@ swift::swift_allocateGenericValueMetadata(const ValueTypeDescriptor *description
 
   auto bytes = (char*) cache.getAllocator().Allocate(totalSize, alignof(void*));
 
+#ifndef NDEBUG
+  // Fill the metadata record with garbage.
+  memset(bytes, 0xAA, totalSize);
+#endif
+
   auto addressPoint = bytes + sizeof(ValueMetadata::HeaderType);
   auto metadata = reinterpret_cast<ValueMetadata *>(addressPoint);
 
@@ -671,6 +688,9 @@ swift::swift_getGenericMetadata(MetadataRequest request,
   auto key = MetadataCacheKey(cache.NumKeyParameters, cache.NumWitnessTables,
                               arguments);
   auto result = cache.getOrInsert(key, request, description, arguments);
+
+  assert(
+      !result.second.Value->isCanonicalStaticallySpecializedGenericMetadata());
 
   return result.second;
 }
@@ -2735,19 +2755,14 @@ initGenericObjCClass(ClassMetadata *self, size_t numFields,
 #endif
 
 SWIFT_CC(swift)
-static std::pair<MetadataDependency, const ClassMetadata *>
-getSuperclassMetadata(ClassMetadata *self, bool allowDependency) {
+SWIFT_RUNTIME_STDLIB_INTERNAL MetadataResponse
+getSuperclassMetadata(MetadataRequest request, const ClassMetadata *self) {
   // If there is a mangled superclass name, demangle it to the superclass
   // type.
-  const ClassMetadata *super = nullptr;
   if (auto superclassNameBase = self->getDescription()->SuperclassType.get()) {
     StringRef superclassName =
       Demangle::makeSymbolicMangledNameStringRef(superclassNameBase);
     SubstGenericParametersFromMetadata substitutions(self);
-    MetadataRequest request(allowDependency
-                              ? MetadataState::NonTransitiveComplete
-                              : /*FIXME*/ MetadataState::Abstract,
-                            /*non-blocking*/ allowDependency);
     MetadataResponse response =
       swift_getTypeByMangledName(request, superclassName,
         substitutions.getGenericArgs(),
@@ -2765,22 +2780,42 @@ getSuperclassMetadata(ClassMetadata *self, bool allowDependency) {
                  superclassName.str().c_str());
     }
 
-    // If the request isn't satisfied, we have a new dependency.
-    if (!request.isSatisfiedBy(response.State)) {
-      assert(allowDependency);
-      return {MetadataDependency(superclass, request.getState()),
-              cast<ClassMetadata>(superclass)};
-    }
+    return response;
+  } else {
+    return MetadataResponse();
+  }
+}
 
+SWIFT_CC(swift)
+static std::pair<MetadataDependency, const ClassMetadata *>
+getSuperclassMetadata(ClassMetadata *self, bool allowDependency) {
+  MetadataRequest request(allowDependency ? MetadataState::NonTransitiveComplete
+                                          : /*FIXME*/ MetadataState::Abstract,
+                          /*non-blocking*/ allowDependency);
+  auto response = getSuperclassMetadata(request, self);
+
+  auto *superclass = response.Value;
+  if (!superclass)
+    return {MetadataDependency(), nullptr};
+
+  const ClassMetadata *second;
 #if SWIFT_OBJC_INTEROP
-    if (auto objcWrapper = dyn_cast<ObjCClassWrapperMetadata>(superclass))
-      superclass = objcWrapper->Class;
+  if (auto objcWrapper = dyn_cast<ObjCClassWrapperMetadata>(superclass)) {
+    second = objcWrapper->Class;
+  } else {
+    second = cast<ClassMetadata>(superclass);
+  }
+#else
+  second = cast<ClassMetadata>(superclass);
 #endif
 
-    super = cast<ClassMetadata>(superclass);
+  // If the request isn't satisfied, we have a new dependency.
+  if (!request.isSatisfiedBy(response.State)) {
+    assert(allowDependency);
+    return {MetadataDependency(superclass, request.getState()), second};
   }
 
-  return {MetadataDependency(), super};
+  return {MetadataDependency(), second};
 }
 
 // Suppress diagnostic about the availability of _objc_realizeClassFromSwift.
@@ -4104,9 +4139,7 @@ StringRef swift::getStringForMetadataKind(MetadataKind kind) {
 /***************************************************************************/
 
 #ifndef NDEBUG
-template <>
-LLVM_ATTRIBUTE_USED
-void Metadata::dump() const {
+template <> SWIFT_USED void Metadata::dump() const {
   printf("TargetMetadata.\n");
   printf("Kind: %s.\n", getStringForMetadataKind(getKind()).data());
   printf("Value Witnesses: %p.\n", getValueWitnesses());
@@ -4159,9 +4192,7 @@ void Metadata::dump() const {
 #endif
 }
 
-template <>
-LLVM_ATTRIBUTE_USED
-void ContextDescriptor::dump() const {
+template <> SWIFT_USED void ContextDescriptor::dump() const {
   printf("TargetTypeContextDescriptor.\n");
   printf("Flags: 0x%x.\n", this->Flags.getIntValue());
   printf("Parent: %p.\n", this->Parent.get());
@@ -4173,9 +4204,7 @@ void ContextDescriptor::dump() const {
   }
 }
 
-template<>
-LLVM_ATTRIBUTE_USED
-void EnumDescriptor::dump() const {
+template <> SWIFT_USED void EnumDescriptor::dump() const {
   printf("TargetEnumDescriptor.\n");
   printf("Flags: 0x%x.\n", this->Flags.getIntValue());
   printf("Parent: %p.\n", this->Parent.get());
@@ -4616,6 +4645,8 @@ static StringRef findAssociatedTypeName(const ProtocolDescriptor *protocol,
   return StringRef();
 }
 
+using AssociatedTypeWitness = std::atomic<const Metadata *>;
+
 SWIFT_CC(swift)
 static MetadataResponse
 swift_getAssociatedTypeWitnessSlowImpl(
@@ -4639,8 +4670,8 @@ swift_getAssociatedTypeWitnessSlowImpl(
 
   // Retrieve the witness.
   unsigned witnessIndex = assocType - reqBase;
-  auto *witnessAddr = &((const Metadata **)wtable)[witnessIndex];
-  auto witness = *witnessAddr;
+  auto *witnessAddr = &((AssociatedTypeWitness*)wtable)[witnessIndex];
+  auto witness = witnessAddr->load(std::memory_order_acquire);
 
 #if SWIFT_PTRAUTH
   uint16_t extraDiscriminator = assocType->Flags.getExtraDiscriminator();
@@ -4650,8 +4681,9 @@ swift_getAssociatedTypeWitnessSlowImpl(
 #endif
   
   // If the low bit of the witness is clear, it's already a metadata pointer.
-  if (LLVM_LIKELY((uintptr_t(witness) &
-        ProtocolRequirementFlags::AssociatedTypeMangledNameBit) == 0)) {
+  if (SWIFT_LIKELY((reinterpret_cast<uintptr_t>(witness) &
+                    ProtocolRequirementFlags::AssociatedTypeMangledNameBit) ==
+                   0)) {
     // Cached metadata pointers are always complete.
     return MetadataResponse{(const Metadata *)witness, MetadataState::Complete};
   }
@@ -4743,8 +4775,14 @@ swift_getAssociatedTypeWitnessSlowImpl(
   if (response.State == MetadataState::Complete) {
     // We pass type metadata around as unsigned pointers, but we sign them
     // in witness tables, which doesn't provide all that much extra security.
-    initAssociatedTypeProtocolWitness(witnessAddr, assocTypeMetadata,
-                                      *assocType);
+    auto valueToStore = assocTypeMetadata;
+#if SWIFT_PTRAUTH
+    valueToStore = ptrauth_sign_unauthenticated(valueToStore,
+                       swift_ptrauth_key_associated_type,
+                       ptrauth_blend_discriminator(witnessAddr,
+                                                   extraDiscriminator));
+#endif
+    witnessAddr->store(valueToStore, std::memory_order_release);
   }
 
   return response;
@@ -4761,8 +4799,8 @@ swift::swift_getAssociatedTypeWitness(MetadataRequest request,
 
   // If the low bit of the witness is clear, it's already a metadata pointer.
   unsigned witnessIndex = assocType - reqBase;
-  auto *witnessAddr = &((const void* *)wtable)[witnessIndex];
-  auto witness = *witnessAddr;
+  auto *witnessAddr = &((const AssociatedTypeWitness *)wtable)[witnessIndex];
+  auto witness = witnessAddr->load(std::memory_order_acquire);
 
 #if SWIFT_PTRAUTH
   uint16_t extraDiscriminator = assocType->Flags.getExtraDiscriminator();
@@ -4771,8 +4809,9 @@ swift::swift_getAssociatedTypeWitness(MetadataRequest request,
                                                           extraDiscriminator));
 #endif
 
-  if (LLVM_LIKELY((uintptr_t(witness) &
-        ProtocolRequirementFlags::AssociatedTypeMangledNameBit) == 0)) {
+  if (SWIFT_LIKELY((reinterpret_cast<uintptr_t>(witness) &
+                    ProtocolRequirementFlags::AssociatedTypeMangledNameBit) ==
+                   0)) {
     // Cached metadata pointers are always complete.
     return MetadataResponse{(const Metadata *)witness, MetadataState::Complete};
   }
@@ -4780,6 +4819,8 @@ swift::swift_getAssociatedTypeWitness(MetadataRequest request,
   return swift_getAssociatedTypeWitnessSlow(request, wtable, conformingType,
                                             reqBase, assocType);
 }
+
+using AssociatedConformanceWitness = std::atomic<void *>;
 
 SWIFT_CC(swift)
 static const WitnessTable *swift_getAssociatedConformanceWitnessSlowImpl(
@@ -4806,8 +4847,8 @@ static const WitnessTable *swift_getAssociatedConformanceWitnessSlowImpl(
 
   // Retrieve the witness.
   unsigned witnessIndex = assocConformance - reqBase;
-  auto *witnessAddr = &((void**)wtable)[witnessIndex];
-  auto witness = *witnessAddr;
+  auto *witnessAddr = &((AssociatedConformanceWitness*)wtable)[witnessIndex];
+  auto witness = witnessAddr->load(std::memory_order_acquire);
 
 #if SWIFT_PTRAUTH
   // For associated protocols, the witness is signed with address
@@ -4823,8 +4864,9 @@ static const WitnessTable *swift_getAssociatedConformanceWitnessSlowImpl(
 #endif
 
   // Fast path: we've already resolved this to a witness table, so return it.
-  if (LLVM_LIKELY((uintptr_t(witness) &
-         ProtocolRequirementFlags::AssociatedTypeMangledNameBit) == 0)) {
+  if (SWIFT_LIKELY((reinterpret_cast<uintptr_t>(witness) &
+                    ProtocolRequirementFlags::AssociatedTypeMangledNameBit) ==
+                   0)) {
     return static_cast<const WitnessTable *>(witness);
   }
 
@@ -4865,9 +4907,18 @@ static const WitnessTable *swift_getAssociatedConformanceWitnessSlowImpl(
 
     // The access function returns an unsigned pointer for now.
 
-    // We can't just use initAssociatedConformanceProtocolWitness because we
-    // also use this function for base protocols.
-    initProtocolWitness(witnessAddr, assocWitnessTable, *assocConformance);
+    auto valueToStore = assocWitnessTable;
+#if SWIFT_PTRAUTH
+    if (assocConformance->Flags.isSignedWithAddress()) {
+      uint16_t extraDiscriminator =
+        assocConformance->Flags.getExtraDiscriminator();
+      valueToStore = ptrauth_sign_unauthenticated(valueToStore,
+                         swift_ptrauth_key_associated_conformance,
+                         ptrauth_blend_discriminator(witnessAddr,
+                                                     extraDiscriminator));
+    }
+#endif
+    witnessAddr->store(valueToStore, std::memory_order_release);
 
     return assocWitnessTable;
   }
@@ -4888,8 +4939,8 @@ const WitnessTable *swift::swift_getAssociatedConformanceWitness(
 
   // Retrieve the witness.
   unsigned witnessIndex = assocConformance - reqBase;
-  auto *witnessAddr = &((const void* *)wtable)[witnessIndex];
-  auto witness = *witnessAddr;
+  auto *witnessAddr = &((AssociatedConformanceWitness*)wtable)[witnessIndex];
+  auto witness = witnessAddr->load(std::memory_order_acquire);
 
 #if SWIFT_PTRAUTH
   uint16_t extraDiscriminator = assocConformance->Flags.getExtraDiscriminator();
@@ -4899,8 +4950,9 @@ const WitnessTable *swift::swift_getAssociatedConformanceWitness(
 #endif
 
   // Fast path: we've already resolved this to a witness table, so return it.
-  if (LLVM_LIKELY((uintptr_t(witness) &
-         ProtocolRequirementFlags::AssociatedTypeMangledNameBit) == 0)) {
+  if (SWIFT_LIKELY((reinterpret_cast<uintptr_t>(witness) &
+                    ProtocolRequirementFlags::AssociatedTypeMangledNameBit) ==
+                   0)) {
     return static_cast<const WitnessTable *>(witness);
   }
 
@@ -5276,9 +5328,9 @@ checkTransitiveCompleteness(const Metadata *initialType) {
 }
 
 /// Diagnose a metadata dependency cycle.
-LLVM_ATTRIBUTE_NORETURN
-static void diagnoseMetadataDependencyCycle(const Metadata *start,
-                                            ArrayRef<MetadataDependency> links){
+SWIFT_NORETURN static void
+diagnoseMetadataDependencyCycle(const Metadata *start,
+                                llvm::ArrayRef<MetadataDependency> links) {
   assert(start == links.back().Value);
 
   std::string diagnostic =
@@ -5466,7 +5518,8 @@ void *MetadataAllocator::Allocate(size_t size, size_t alignment) {
   }
 }
 
-void MetadataAllocator::Deallocate(const void *allocation, size_t size) {
+void MetadataAllocator::Deallocate(const void *allocation, size_t size,
+                                   size_t alignment) {
   __asan_poison_memory_region(allocation, size);
 
   if (size > PoolRange::MaxPoolAllocationSize) {
@@ -5504,16 +5557,6 @@ bool Metadata::satisfiesClassConstraint() const {
 
   // or it's a class.
   return isAnyClass();
-}
-
-template <>
-bool Metadata::isCanonicalStaticallySpecializedGenericMetadata() const {
-  if (auto *metadata = dyn_cast<StructMetadata>(this))
-    return metadata->isCanonicalStaticallySpecializedGenericMetadata();
-  if (auto *metadata = dyn_cast<EnumMetadata>(this))
-    return metadata->isCanonicalStaticallySpecializedGenericMetadata();
-
-  return false;
 }
 
 #if !NDEBUG

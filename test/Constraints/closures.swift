@@ -63,7 +63,7 @@ var evenOrOdd : (Int) -> String = {$0 % 2 == 0 ? "even" : "odd"}
 
 // <rdar://problem/15367882>
 func foo() {
-  not_declared({ $0 + 1 }) // expected-error{{use of unresolved identifier 'not_declared'}}
+  not_declared({ $0 + 1 }) // expected-error{{cannot find 'not_declared' in scope}}
 }
 
 // <rdar://problem/15536725>
@@ -273,7 +273,6 @@ func verify_NotAC_to_AC_failure(_ arg: () -> ()) {
 // SR-1069 - Error diagnostic refers to wrong argument
 class SR1069_W<T> {
   func append<Key: AnyObject>(value: T, forKey key: Key) where Key: Hashable {}
-  // expected-note@-1 {{where 'Key' = 'Object?'}}
 }
 class SR1069_C<T> { let w: SR1069_W<(AnyObject, T) -> ()> = SR1069_W() }
 struct S<T> {
@@ -281,9 +280,10 @@ struct S<T> {
 
   func subscribe<Object: AnyObject>(object: Object?, method: (Object, T) -> ()) where Object: Hashable {
     let wrappedMethod = { (object: AnyObject, value: T) in }
-    // expected-error @+2 {{instance method 'append(value:forKey:)' requires that 'Object?' be a class type}}
-    // expected-note @+1 {{wrapped type 'Object' satisfies this requirement}}
     cs.forEach { $0.w.append(value: wrappedMethod, forKey: object) }
+    // expected-error@-1 {{value of optional type 'Object?' must be unwrapped to a value of type 'Object'}}
+    // expected-note@-2 {{coalesce using '??' to provide a default when the optional value contains 'nil'}}
+    // expected-note@-3 {{force-unwrap using '!' to abort execution if the optional value contains 'nil'}}
   }
 }
 
@@ -504,7 +504,7 @@ struct S_3520 {
 func sr3520_set_via_closure<S, T>(_ closure: (inout S, T) -> ()) {} // expected-note {{in call to function 'sr3520_set_via_closure'}}
 sr3520_set_via_closure({ $0.number1 = $1 })
 // expected-error@-1 {{generic parameter 'S' could not be inferred}}
-// expected-error@-2 {{generic parameter 'T' could not be inferred}}
+// expected-error@-2 {{unable to infer type of a closure parameter $1 in the current context}}
 
 // SR-3073: UnresolvedDotExpr in single expression closure
 
@@ -588,7 +588,7 @@ extension A_SR_5030 {
 }
 
 // rdar://problem/33296619
-let u = rdar33296619().element //expected-error {{use of unresolved identifier 'rdar33296619'}}
+let u = rdar33296619().element //expected-error {{cannot find 'rdar33296619' in scope}}
 
 [1].forEach { _ in
   _ = "\(u)"
@@ -614,7 +614,7 @@ _ = "".withCString { UnsafeMutableRawPointer(mutating: $0) }
 
 // rdar://problem/34077439 - Crash when pre-checking bails out and
 // leaves us with unfolded SequenceExprs inside closure body.
-_ = { (offset) -> T in // expected-error {{use of undeclared type 'T'}}
+_ = { (offset) -> T in // expected-error {{cannot find type 'T' in scope}}
   return offset ? 0 : 0
 }
 
@@ -793,7 +793,7 @@ func test() -> Int? {
 }
 
 var fn: () -> [Int] = {}
-// expected-error@-1 {{cannot convert value of type '()' to closure result type '[Int]'}}
+// expected-error@-1 {{cannot convert value of type '[Int]' to closure result type '()'}}
 
 fn = {}
 // expected-error@-1 {{cannot assign value of type '() -> ()' to type '() -> [Int]'}}
@@ -921,14 +921,6 @@ func test_trailing_closure_with_defaulted_last() {
   func foo<T>(fn: () -> T, value: Int = 0) {}
   foo { 42 } // Ok
   foo(fn: { 42 }) // Ok
-
-  func bar<T>(type: T.Type, fn: T, a: Int = 0) {}
-  bar(type: (() -> Int).self) { 42 }
-  bar(type: (() -> Int).self, fn: { 42 })
-
-  func baz(fn: () -> Int, a: Int = 0, b: Int = 0, c: Int = 0) {}
-  baz { 42 }
-  baz(fn: { 42 })
 }
 
 // Test that even in multi-statement closure case we still pick up `(Action) -> Void` over `Optional<(Action) -> Void>`.
@@ -980,6 +972,7 @@ func test_correct_inference_of_closure_result_in_presence_of_optionals() {
   }
 }
 
+
 // rdar://problem/59741308 - inference fails with tuple element has to joined to supertype
 func rdar_59741308() {
   class Base {
@@ -1011,4 +1004,34 @@ func rdar52204414() {
   // expected-error@-1 {{cannot convert value of type 'Int' to closure result type 'Void'}}
   let _ = { () -> Void in return 42 }
   // expected-error@-1 {{declared closure result 'Int' is incompatible with contextual type 'Void'}}
+}
+
+// SR-12291 - trailing closure is used as an argument to the last (positionally) parameter
+func overloaded_with_default(a: () -> Int, b: Int = 0, c: Int = 0) {}
+func overloaded_with_default(b: Int = 0, c: Int = 0, a: () -> Int) {}
+
+overloaded_with_default { 0 } // Ok (could be ambiguous if trailing was allowed to match `a:` in first overload)
+
+func overloaded_with_default_and_autoclosure<T>(_ a: @autoclosure () -> T, b: Int = 0) {}
+func overloaded_with_default_and_autoclosure<T>(b: Int = 0, c: @escaping () -> T?) {}
+
+overloaded_with_default_and_autoclosure { 42 } // Ok
+overloaded_with_default_and_autoclosure(42) // Ok
+
+// SR-12815 - `error: type of expression is ambiguous without more context` in many cases where methods are missing
+func sr12815() {
+  let _ = { a, b in }
+  // expected-error@-1 {{unable to infer type of a closure parameter 'a' in the current context}}
+  // expected-error@-2 {{unable to infer type of a closure parameter 'b' in the current context}}
+
+  _ = .a { b in } // expected-error {{cannot infer contextual base in reference to member 'a'}}
+
+  struct S {}
+
+  func test(s: S) {
+    S.doesntExist { b in } // expected-error {{type 'S' has no member 'doesntExist'}}
+    s.doesntExist { b in } // expected-error {{value of type 'S' has no member 'doesntExist'}}
+    s.doesntExist1 { v in } // expected-error {{value of type 'S' has no member 'doesntExist1'}}
+     .doesntExist2() { $0 }
+  }
 }

@@ -129,7 +129,7 @@ llvm::InlineAsm *IRGenModule::getObjCRetainAutoreleasedReturnValueMarker() {
   if (IRGen.Opts.shouldOptimize()) {
     const char *markerKey = "clang.arc.retainAutoreleasedReturnValueMarker";
     if (!Module.getModuleFlag(markerKey)) {
-      auto *str = llvm::MDString::get(LLVMContext, asmString);
+      auto *str = llvm::MDString::get(getLLVMContext(), asmString);
       Module.addModuleFlag(llvm::Module::Error, markerKey, str);
     }
 
@@ -259,7 +259,7 @@ llvm::Constant *IRGenModule::getAddrOfObjCMethodName(StringRef selector) {
   if (entry) return entry;
 
   // If not, create it.  This implicitly adds a trailing null.
-  auto init = llvm::ConstantDataArray::getString(LLVMContext, selector);
+  auto init = llvm::ConstantDataArray::getString(getLLVMContext(), selector);
   auto global = new llvm::GlobalVariable(Module, init->getType(), false,
                                          llvm::GlobalValue::PrivateLinkage,
                                          init,
@@ -775,7 +775,8 @@ static llvm::Function *emitObjCPartialApplicationForwarder(IRGenModule &IGM,
     assert(origMethodType->getNumIndirectFormalResults() == 1);
     formalIndirectResult = params.claimNext();
   } else {
-    SILType appliedResultTy = origMethodType->getDirectFormalResultsType(IGM.getSILModule());
+    SILType appliedResultTy = origMethodType->getDirectFormalResultsType(
+        IGM.getSILModule(), IGM.getMaximalTypeExpansionContext());
     indirectedResultTI =
       &cast<LoadableTypeInfo>(IGM.getTypeInfo(appliedResultTy));
     auto &nativeSchema = indirectedResultTI->nativeReturnValueSchema(IGM);
@@ -804,8 +805,12 @@ static llvm::Function *emitObjCPartialApplicationForwarder(IRGenModule &IGM,
     }
     // Otherwise, we have a loadable type that can either be passed directly or
     // indirectly.
-    assert(info.getSILStorageType(IGM.getSILModule(), origMethodType).isObject());
-    auto curSILType = info.getSILStorageType(IGM.getSILModule(), origMethodType);
+    assert(info.getSILStorageType(IGM.getSILModule(), origMethodType,
+                                  IGM.getMaximalTypeExpansionContext())
+               .isObject());
+    auto curSILType =
+        info.getSILStorageType(IGM.getSILModule(), origMethodType,
+                               IGM.getMaximalTypeExpansionContext());
     auto &ti = cast<LoadableTypeInfo>(IGM.getTypeInfo(curSILType));
 
     // Load the indirectly passed parameter.
@@ -858,8 +863,8 @@ static llvm::Function *emitObjCPartialApplicationForwarder(IRGenModule &IGM,
     emission.emitToExplosion(result, false);
     cleanup();
     auto &callee = emission.getCallee();
-    auto resultType =
-    callee.getOrigFunctionType()->getDirectFormalResultsType(IGM.getSILModule());
+    auto resultType = callee.getOrigFunctionType()->getDirectFormalResultsType(
+        IGM.getSILModule(), IGM.getMaximalTypeExpansionContext());
     subIGF.emitScalarReturn(resultType, resultType, result,
                             true /*isSwiftCCReturn*/, false);
   }
@@ -1080,8 +1085,8 @@ static llvm::Constant *getObjCEncodingForTypes(IRGenModule &IGM,
   // TODO. Encode type qualifier, 'in', 'inout', etc. for the parameter.
   std::string paramsString;
   for (auto param : params) {
-    auto clangType = IGM.getClangType(
-                            param.getArgumentType(IGM.getSILModule(), fnType));
+    auto clangType = IGM.getClangType(param.getArgumentType(
+        IGM.getSILModule(), fnType, IGM.getMaximalTypeExpansionContext()));
     if (clangType.isNull())
       return llvm::ConstantPointerNull::get(IGM.Int8PtrTy);
     
@@ -1361,33 +1366,23 @@ static void emitObjCDescriptor(IRGenModule &IGM,
 /// };
 void irgen::emitObjCMethodDescriptor(IRGenModule &IGM,
                                      ConstantArrayBuilder &descriptors,
-                                     AbstractFunctionDecl *method,
-                                     llvm::StringSet<> &uniqueSelectors) {
-  // Don't emit a selector twice.
-  Selector selector(method);
-  if (!uniqueSelectors.insert(selector.str()).second)
-    return;
-
+                                     AbstractFunctionDecl *method) {
   ObjCMethodDescriptor descriptor(
     emitObjCMethodDescriptorParts(IGM, method, /*concrete*/ true));
   emitObjCDescriptor(IGM, descriptors, descriptor);
 }
 
-void irgen::emitObjCIVarInitDestroyDescriptor(
-    IRGenModule &IGM, ConstantArrayBuilder &descriptors, ClassDecl *cd,
-    llvm::Function *objcImpl, bool isDestroyer,
-    llvm::StringSet<> &uniqueSelectors) {
+void irgen::emitObjCIVarInitDestroyDescriptor(IRGenModule &IGM,
+                                              ConstantArrayBuilder &descriptors,
+                                              ClassDecl *cd,
+                                              llvm::Function *objcImpl,
+                                              bool isDestroyer) {
   /// The first element is the selector.
   SILDeclRef declRef = SILDeclRef(cd, 
                                   isDestroyer? SILDeclRef::Kind::IVarDestroyer
                                              : SILDeclRef::Kind::IVarInitializer,
                                   /*foreign*/ true);
   Selector selector(declRef);
-
-  // Don't emit a selector twice.
-  if (!uniqueSelectors.insert(selector.str()).second)
-    return;
-
   ObjCMethodDescriptor descriptor{};
   descriptor.selectorRef = IGM.getAddrOfObjCMethodName(selector.str());
   

@@ -519,6 +519,8 @@ namespace {
                                  MakeTemporarilyEscapableExpr *E, SGFContext C);
 
     RValue visitOpaqueValueExpr(OpaqueValueExpr *E, SGFContext C);
+    RValue visitPropertyWrapperValuePlaceholderExpr(
+        PropertyWrapperValuePlaceholderExpr *E, SGFContext C);
 
     RValue visitInOutToPointerExpr(InOutToPointerExpr *E, SGFContext C);
     RValue visitArrayToPointerExpr(ArrayToPointerExpr *E, SGFContext C);
@@ -531,6 +533,16 @@ namespace {
     RValue visitTapExpr(TapExpr *E, SGFContext C);
     RValue visitDefaultArgumentExpr(DefaultArgumentExpr *E, SGFContext C);
     RValue visitErrorExpr(ErrorExpr *E, SGFContext C);
+
+    RValue visitDifferentiableFunctionExpr(DifferentiableFunctionExpr *E,
+                                           SGFContext C);
+    RValue visitLinearFunctionExpr(LinearFunctionExpr *E, SGFContext C);
+    RValue visitDifferentiableFunctionExtractOriginalExpr(
+        DifferentiableFunctionExtractOriginalExpr *E, SGFContext C);
+    RValue visitLinearFunctionExtractOriginalExpr(
+        LinearFunctionExtractOriginalExpr *E, SGFContext C);
+    RValue visitLinearToDifferentiableFunctionExpr(
+        LinearToDifferentiableFunctionExpr *E, SGFContext C);
   };
 } // end anonymous namespace
 
@@ -1293,7 +1305,7 @@ RValue RValueEmitter::visitDerivedToBaseExpr(DerivedToBaseExpr *E,
   if (inExclusiveBorrowSelfSection(SGF.SelfInitDelegationState)) {
     if (auto *dre = dyn_cast<DeclRefExpr>(E->getSubExpr())) {
       if (isa<ParamDecl>(dre->getDecl()) &&
-          dre->getDecl()->getFullName() == SGF.getASTContext().Id_self &&
+          dre->getDecl()->getName() == SGF.getASTContext().Id_self &&
           dre->getDecl()->isImplicit()) {
         return visitDerivedToBaseExprOfSelf(SGF, dre, E, C);
       }
@@ -2361,7 +2373,7 @@ SILValue SILGenFunction::emitMetatypeOfValue(SILLocation loc, Expr *baseExpr) {
     if (inExclusiveBorrowSelfSection(SelfInitDelegationState)) {
       if (auto *dre = dyn_cast<DeclRefExpr>(baseExpr)) {
         if (isa<ParamDecl>(dre->getDecl()) &&
-            dre->getDecl()->getFullName() == getASTContext().Id_self &&
+            dre->getDecl()->getName() == getASTContext().Id_self &&
             dre->getDecl()->isImplicit()) {
           return emitMetatypeOfDelegatingInitExclusivelyBorrowedSelf(
               *this, loc, dre, metaTy);
@@ -2397,9 +2409,25 @@ RValue RValueEmitter::visitCaptureListExpr(CaptureListExpr *E, SGFContext C) {
   return visit(E->getClosureBody(), C);
 }
 
+/// Returns the wrapped value placeholder that is meant to be substituted
+/// in for the given autoclosure. This autoclosure placeholder is created
+/// when \c init(wrappedValue:) takes an autoclosure for the \c wrappedValue
+/// parameter.
+static PropertyWrapperValuePlaceholderExpr *
+wrappedValueAutoclosurePlaceholder(const AbstractClosureExpr *e) {
+  if (auto ace = dyn_cast<AutoClosureExpr>(e)) {
+    if (auto ce = dyn_cast<CallExpr>(ace->getSingleExpressionBody())) {
+      return dyn_cast<PropertyWrapperValuePlaceholderExpr>(ce->getFn());
+    }
+  }
+  return nullptr;
+}
 
 RValue RValueEmitter::visitAbstractClosureExpr(AbstractClosureExpr *e,
                                                SGFContext C) {
+  if (auto *placeholder = wrappedValueAutoclosurePlaceholder(e))
+    return visitPropertyWrapperValuePlaceholderExpr(placeholder, C);
+
   // Emit the closure body.
   SGF.SGM.emitClosure(e);
 
@@ -2744,9 +2772,9 @@ static SILFunction *getOrCreateKeyPathGetter(SILGenModule &SGM,
 
   auto entry = thunk->begin();
   auto resultArgTy = signature->getSingleResult().getSILStorageType(
-      SGM.M, signature);
+      SGM.M, signature, subSGF.F.getTypeExpansionContext());
   auto baseArgTy = signature->getParameters()[0].getSILStorageType(
-      SGM.M, signature);
+      SGM.M, signature, subSGF.F.getTypeExpansionContext());
   if (genericEnv) {
     resultArgTy = genericEnv->mapTypeIntoContext(SGM.M, resultArgTy);
     baseArgTy = genericEnv->mapTypeIntoContext(SGM.M, baseArgTy);
@@ -2756,7 +2784,7 @@ static SILFunction *getOrCreateKeyPathGetter(SILGenModule &SGM,
   SILValue indexPtrArg;
   if (!indexes.empty()) {
     auto indexArgTy = signature->getParameters()[1].getSILStorageType(
-        SGM.M, signature);
+        SGM.M, signature, subSGF.F.getTypeExpansionContext());
     indexPtrArg = entry->createFunctionArgument(indexArgTy);
   }
   
@@ -2894,9 +2922,9 @@ static SILFunction *getOrCreateKeyPathSetter(SILGenModule &SGM,
 
   auto entry = thunk->begin();
   auto valueArgTy = signature->getParameters()[0].getSILStorageType(
-      SGM.M, signature);
+      SGM.M, signature, subSGF.getTypeExpansionContext());
   auto baseArgTy = signature->getParameters()[1].getSILStorageType(
-      SGM.M, signature);
+      SGM.M, signature, subSGF.getTypeExpansionContext());
   if (genericEnv) {
     valueArgTy = genericEnv->mapTypeIntoContext(SGM.M, valueArgTy);
     baseArgTy = genericEnv->mapTypeIntoContext(SGM.M, baseArgTy);
@@ -2907,7 +2935,7 @@ static SILFunction *getOrCreateKeyPathSetter(SILGenModule &SGM,
   
   if (!indexes.empty()) {
     auto indexArgTy = signature->getParameters()[2].getSILStorageType(
-        SGM.M, signature);
+        SGM.M, signature, subSGF.getTypeExpansionContext());
     indexPtrArg = entry->createFunctionArgument(indexArgTy);
   }
 
@@ -3061,10 +3089,10 @@ getOrCreateKeyPathEqualsAndHash(SILGenModule &SGM,
     SILGenFunction subSGF(SGM, *equals, SGM.SwiftModule);
     equals->setGenericEnvironment(genericEnv);
     auto entry = equals->begin();
-    auto lhsPtr =
-      entry->createFunctionArgument(params[0].getSILStorageType(SGM.M, signature));
-    auto rhsPtr =
-      entry->createFunctionArgument(params[1].getSILStorageType(SGM.M, signature));
+    auto lhsPtr = entry->createFunctionArgument(params[0].getSILStorageType(
+        SGM.M, signature, subSGF.getTypeExpansionContext()));
+    auto rhsPtr = entry->createFunctionArgument(params[1].getSILStorageType(
+        SGM.M, signature, subSGF.getTypeExpansionContext()));
 
     Scope scope(subSGF, loc);
 
@@ -3236,8 +3264,8 @@ getOrCreateKeyPathEqualsAndHash(SILGenModule &SGM,
     SILGenFunction subSGF(SGM, *hash, SGM.SwiftModule);
     hash->setGenericEnvironment(genericEnv);
     auto entry = hash->begin();
-    auto indexPtr = entry->createFunctionArgument(
-                                params[0].getSILStorageType(SGM.M, signature));
+    auto indexPtr = entry->createFunctionArgument(params[0].getSILStorageType(
+        SGM.M, signature, subSGF.getTypeExpansionContext()));
 
     SILValue hashCode;
 
@@ -3319,11 +3347,15 @@ getIdForKeyPathComponentComputedProperty(SILGenModule &SGM,
     // Identify the property using its (unthunked) getter. For a
     // computed property, this should be stable ABI; for a resilient public
     // property, this should also be stable ABI across modules.
+    auto representativeDecl = getRepresentativeAccessorForKeyPath(storage);
+    // If the property came from an import-as-member function defined in C,
+    // use the original C function as the key.
+    bool isForeign = representativeDecl->isImportAsMember();
+    auto getterRef = SILDeclRef(representativeDecl,
+                                SILDeclRef::Kind::Func, isForeign);
     // TODO: If the getter has shared linkage (say it's synthesized for a
     // Clang-imported thing), we'll need some other sort of
     // stable identifier.
-    auto getterRef = SILDeclRef(getRepresentativeAccessorForKeyPath(storage),
-                                SILDeclRef::Kind::Func);
     return SGM.getFunction(getterRef, NotForDefinition);
   }
   case AccessStrategy::DispatchToAccessor: {
@@ -4067,8 +4099,6 @@ static bool isVerbatimNullableTypeInC(SILModule &M, Type ty) {
 
   // Other types like UnsafePointer can also be nullable.
   const DeclContext *DC = M.getAssociatedContext();
-  if (!DC)
-    DC = M.getSwiftModule();
   ty = OptionalType::get(ty);
   return ty->isTriviallyRepresentableIn(ForeignLanguage::C, DC);
 }
@@ -5104,6 +5134,11 @@ RValue RValueEmitter::visitOpaqueValueExpr(OpaqueValueExpr *E, SGFContext C) {
   return RValue(SGF, E, SGF.manageOpaqueValue(value, E, C));
 }
 
+RValue RValueEmitter::visitPropertyWrapperValuePlaceholderExpr(
+    PropertyWrapperValuePlaceholderExpr *E, SGFContext C) {
+  return visitOpaqueValueExpr(E->getOpaqueValuePlaceholder(), C);
+}
+
 ProtocolDecl *SILGenFunction::getPointerProtocol() {
   if (SGM.PointerProtocol)
     return *SGM.PointerProtocol;
@@ -5405,6 +5440,51 @@ RValue RValueEmitter::visitForeignObjectConversionExpr(
 RValue RValueEmitter::visitUnevaluatedInstanceExpr(UnevaluatedInstanceExpr *E,
                                                    SGFContext C) {
   llvm_unreachable("unevaluated_instance expression can never be evaluated");
+}
+
+RValue RValueEmitter::visitDifferentiableFunctionExpr(
+    DifferentiableFunctionExpr *E, SGFContext C) {
+  auto origFunc = SGF.emitRValueAsSingleValue(E->getSubExpr());
+  auto destTy = SGF.getLoweredType(E->getType()).castTo<SILFunctionType>();
+  auto *diffFunc = SGF.B.createDifferentiableFunction(
+      E, destTy->getDifferentiabilityParameterIndices(), origFunc.forward(SGF));
+  return RValue(SGF, E, SGF.emitManagedRValueWithCleanup(diffFunc));
+}
+
+RValue RValueEmitter::visitLinearFunctionExpr(
+    LinearFunctionExpr *E, SGFContext C) {
+  auto origFunc = SGF.emitRValueAsSingleValue(E->getSubExpr());
+  auto destTy = SGF.getLoweredType(E->getType()).castTo<SILFunctionType>();
+  auto *diffFunc = SGF.B.createLinearFunction(
+      E, destTy->getDifferentiabilityParameterIndices(), origFunc.forward(SGF));
+  return RValue(SGF, E, SGF.emitManagedRValueWithCleanup(diffFunc));
+}
+
+RValue RValueEmitter::visitDifferentiableFunctionExtractOriginalExpr(
+    DifferentiableFunctionExtractOriginalExpr *E, SGFContext C) {
+  auto diffFunc = SGF.emitRValueAsSingleValue(E->getSubExpr());
+  auto borrowedDiffFunc = diffFunc.borrow(SGF, E);
+  auto *borrowedOrigFunc = SGF.B.createDifferentiableFunctionExtractOriginal(
+      E, borrowedDiffFunc.getValue());
+  auto ownedOrigFunc = SGF.B.emitCopyValueOperation(E, borrowedOrigFunc);
+  return RValue(SGF, E, SGF.emitManagedRValueWithCleanup(ownedOrigFunc));
+}
+
+RValue RValueEmitter::visitLinearFunctionExtractOriginalExpr(
+    LinearFunctionExtractOriginalExpr *E, SGFContext C) {
+  auto diffFunc = SGF.emitRValueAsSingleValue(E->getSubExpr());
+  auto borrowedDiffFunc = diffFunc.borrow(SGF, E);
+  auto *borrowedOrigFunc = SGF.B.createLinearFunctionExtract(
+      E, LinearDifferentiableFunctionTypeComponent::Original,
+      borrowedDiffFunc.getValue());
+  auto ownedOrigFunc = SGF.B.emitCopyValueOperation(E, borrowedOrigFunc);
+  return RValue(SGF, E, SGF.emitManagedRValueWithCleanup(ownedOrigFunc));
+}
+
+RValue RValueEmitter::visitLinearToDifferentiableFunctionExpr(
+    LinearToDifferentiableFunctionExpr *E, SGFContext C) {
+  // TODO: Implement this.
+  llvm_unreachable("Unsupported!");
 }
 
 RValue RValueEmitter::visitTapExpr(TapExpr *E, SGFContext C) {

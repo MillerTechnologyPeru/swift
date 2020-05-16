@@ -442,13 +442,13 @@ class r22344208 {
   }
 }
 
-var f = { (s: Undeclared) -> Int in 0 } // expected-error {{use of undeclared type 'Undeclared'}}
+var f = { (s: Undeclared) -> Int in 0 } // expected-error {{cannot find type 'Undeclared' in scope}}
 
 // <rdar://problem/21375863> Swift compiler crashes when using closure, declared to return illegal type.
 func r21375863() {
-  var width = 0
-  var height = 0
-  var bufs: [[UInt8]] = (0..<4).map { _ -> [asdf] in  // expected-error {{use of undeclared type 'asdf'}}
+  var width = 0 // expected-warning {{variable 'width' was never mutated}}
+  var height = 0 // expected-warning {{variable 'height' was never mutated}}
+  var bufs: [[UInt8]] = (0..<4).map { _ -> [asdf] in  // expected-error {{cannot find type 'asdf' in scope}} expected-warning {{variable 'bufs' was never used}}
     [UInt8](repeating: 0, count: width*height)
   }
 }
@@ -483,3 +483,24 @@ let closure = { // expected-error {{unable to infer complex closure return type;
   var helper = true
   return helper
 }
+
+// SR-9839
+func SR9839(_ x: @escaping @convention(block) () -> Void) {}
+
+func id<T>(_ x: T) -> T {
+  return x
+}
+
+var qux: () -> Void = {}
+
+SR9839(qux)
+SR9839(id(qux)) // expected-error {{conflicting arguments to generic parameter 'T' ('() -> Void' vs. '@convention(block) () -> Void')}}
+
+func forceUnwrap<T>(_ x: T?) -> T {
+  return x!
+}
+
+var qux1: (() -> Void)? = {}
+
+SR9839(qux1!)
+SR9839(forceUnwrap(qux1))

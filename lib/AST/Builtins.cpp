@@ -19,15 +19,16 @@
 #include "swift/AST/FileUnit.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/ParameterList.h"
-#include "swift/Basic/LLVMContext.h"
+#include "swift/AST/TypeCheckRequests.h"
 #include "swift/Strings.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
-#include "llvm/IR/LLVMContext.h"
+#include "llvm/Support/ManagedStatic.h"
 #include <tuple>
+
 using namespace swift;
 
 struct BuiltinExtraInfoTy {
@@ -44,13 +45,13 @@ bool BuiltinInfo::isReadNone() const {
   return strchr(BuiltinExtraInfo[(unsigned)ID].Attributes, 'n') != nullptr;
 }
 
-bool IntrinsicInfo::hasAttribute(llvm::Attribute::AttrKind Kind) const {
+const llvm::AttributeList &
+IntrinsicInfo::getOrCreateAttributes(ASTContext &Ctx) const {
   using DenseMapInfo = llvm::DenseMapInfo<llvm::AttributeList>;
   if (DenseMapInfo::isEqual(Attrs, DenseMapInfo::getEmptyKey())) {
-    // FIXME: We should not be relying on the global LLVM context.
-    Attrs = llvm::Intrinsic::getAttributes(getGlobalLLVMContext(), ID);
+    Attrs = llvm::Intrinsic::getAttributes(Ctx.getIntrinsicScratchContext(), ID);
   }
-  return Attrs.hasFnAttribute(Kind);
+  return Attrs;
 }
 
 Type swift::getBuiltinType(ASTContext &Context, StringRef Name) {
@@ -184,7 +185,9 @@ static FuncDecl *
 getBuiltinGenericFunction(Identifier Id,
                           ArrayRef<AnyFunctionType::Param> ArgParamTypes,
                           Type ResType,
-                          GenericParamList *GenericParams) {
+                          GenericParamList *GenericParams,
+                          GenericSignature Sig,
+                          bool Rethrows = false) {
   assert(GenericParams && "Missing generic parameters");
   auto &Context = ResType->getASTContext();
 
@@ -213,13 +216,16 @@ getBuiltinGenericFunction(Identifier Id,
                                StaticSpellingKind::None,
                                /*FuncLoc=*/SourceLoc(),
                                Name, /*NameLoc=*/SourceLoc(),
-                               /*Throws=*/false, /*ThrowsLoc=*/SourceLoc(),
+                               /*Throws=*/ Rethrows, /*ThrowsLoc=*/SourceLoc(),
                                GenericParams,
                                paramList,
                                TypeLoc::withoutLoc(ResType), DC);
 
   func->setImplicit();
   func->setAccess(AccessLevel::Public);
+  func->setGenericSignature(Sig);
+  if (Rethrows)
+    func->getAttrs().add(new (Context) RethrowsAttr(/*ThrowsLoc*/ SourceLoc()));
 
   return func;
 }
@@ -425,12 +431,25 @@ createGenericParam(ASTContext &ctx, const char *name, unsigned index) {
 
 /// Create a generic parameter list with multiple generic parameters.
 static GenericParamList *getGenericParams(ASTContext &ctx,
-                                          unsigned numParameters) {
+                                          unsigned numParameters,
+                                          bool isAnyObject) {
   assert(numParameters <= llvm::array_lengthof(GenericParamNames));
 
   SmallVector<GenericTypeParamDecl*, 2> genericParams;
   for (unsigned i = 0; i != numParameters; ++i)
     genericParams.push_back(createGenericParam(ctx, GenericParamNames[i], i));
+
+
+  if (isAnyObject) {
+    CanType ao = ctx.getAnyObjectType();
+    SmallVector<RequirementRepr, 1> req;
+    req.push_back(RequirementRepr::getTypeConstraint(TypeLoc::withoutLoc(genericParams[0]->getInterfaceType()), SourceLoc(),
+      TypeLoc::withoutLoc(ao)));
+
+    auto paramList = GenericParamList::create(ctx, SourceLoc(), genericParams,
+                                              SourceLoc(), req, SourceLoc());
+    return paramList;
+  }
 
   auto paramList = GenericParamList::create(ctx, SourceLoc(), genericParams,
                                             SourceLoc());
@@ -446,11 +465,22 @@ namespace {
     GenericParamList *TheGenericParamList;
     SmallVector<AnyFunctionType::Param, 4> InterfaceParams;
     Type InterfaceResult;
+    bool Rethrows = false;
+
+    // Accumulate params and requirements here, so that we can make the
+    // appropriate `AbstractGenericSignatureRequest` when `build()` is called.
+    SmallVector<GenericTypeParamType *, 2> genericParamTypes;
+    SmallVector<Requirement, 2> addedRequirements;
 
   public:
-    BuiltinFunctionBuilder(ASTContext &ctx, unsigned numGenericParams = 1)
+    BuiltinFunctionBuilder(ASTContext &ctx, unsigned numGenericParams = 1,
+                           bool isAnyObject = false)
         : Context(ctx) {
-      TheGenericParamList = getGenericParams(ctx, numGenericParams);
+      TheGenericParamList = getGenericParams(ctx, numGenericParams, isAnyObject);
+      for (auto gp : TheGenericParamList->getParams()) {
+        genericParamTypes.push_back(
+            gp->getDeclaredInterfaceType()->castTo<GenericTypeParamType>());
+      }
     }
 
     template <class G>
@@ -466,10 +496,27 @@ namespace {
       InterfaceResult = generator.build(*this);
     }
 
+    template <class G>
+    void addConformanceRequirement(const G &generator, ProtocolDecl *proto) {
+      Requirement req(RequirementKind::Conformance,
+                      generator.build(*this),
+                      proto->getDeclaredType());
+      addedRequirements.push_back(req);
+    }
+
+    void setRethrows(bool rethrows = true) {
+      Rethrows = rethrows;
+    }
+
     FuncDecl *build(Identifier name) {
+      auto GenericSig = evaluateOrDefault(
+        Context.evaluator,
+        AbstractGenericSignatureRequest{
+          nullptr, std::move(genericParamTypes), std::move(addedRequirements)},
+        nullptr);
       return getBuiltinGenericFunction(name, InterfaceParams,
                                        InterfaceResult,
-                                       TheGenericParamList);
+                                       TheGenericParamList, GenericSig);
     }
 
     // Don't use these generator classes directly; call the make{...}
@@ -609,6 +656,14 @@ static ValueDecl *getIsUniqueOperation(ASTContext &Context, Identifier Id) {
   BuiltinFunctionBuilder builder(Context);
   builder.addParameter(makeGenericParam(), ValueOwnership::InOut);
   builder.setResult(makeConcrete(Int1Ty));
+  return builder.build(Id);
+}
+
+static ValueDecl *getEndCOWMutation(ASTContext &Context, Identifier Id) {
+  // <T> (@inout T) -> ()
+  BuiltinFunctionBuilder builder(Context);
+  builder.addParameter(makeGenericParam(), ValueOwnership::InOut);
+  builder.setResult(makeConcrete(TupleType::getEmpty(Context)));
   return builder.build(Id);
 }
 
@@ -875,6 +930,16 @@ static ValueDecl *getValueToBridgeObject(ASTContext &C, Identifier Id) {
   return builder.build(Id);
 }
 
+static ValueDecl *getCOWBufferForReading(ASTContext &C, Identifier Id) {
+  // <T : AnyObject> T -> T
+  //
+  BuiltinFunctionBuilder builder(C, 1, true);
+  auto T = makeGenericParam();
+  builder.addParameter(T);
+  builder.setResult(T);
+  return builder.build(Id);
+}
+
 static ValueDecl *getUnsafeGuaranteed(ASTContext &C, Identifier Id) {
   // <T : AnyObject> T -> (T, Int8Ty)
   //
@@ -941,6 +1006,296 @@ static ValueDecl *getGetObjCTypeEncodingOperation(ASTContext &Context,
   builder.setResult(makeConcrete(Context.TheRawPointerType));
   return builder.build(Id);
 }
+
+static ValueDecl *getAutoDiffApplyDerivativeFunction(
+    ASTContext &Context, Identifier Id, AutoDiffDerivativeFunctionKind kind,
+    unsigned arity, bool throws) {
+  assert(arity >= 1);
+  // JVP:
+  //   <...T...(arity), R> (@differentiable (...T) throws -> R, ...T)
+  //       rethrows -> (R, (...T.TangentVector) -> R.TangentVector)
+  // VJP:
+  //   <...T...(arity), R> (@differentiable (...T) throws -> R, ...T)
+  //       rethrows -> (R, (R.TangentVector) -> ...T.TangentVector)
+  unsigned numGenericParams = 1 + arity;
+  BuiltinFunctionBuilder builder(Context, numGenericParams);
+  // Get the `Differentiable` protocol.
+  auto *diffableProto = Context.getProtocol(KnownProtocolKind::Differentiable);
+  // Create type parameters and add conformance constraints.
+  auto fnResultGen = makeGenericParam(arity);
+  builder.addConformanceRequirement(fnResultGen, diffableProto);
+  SmallVector<decltype(fnResultGen), 2> fnParamGens;
+  for (auto i : range(arity)) {
+    auto T = makeGenericParam(i);
+    builder.addConformanceRequirement(T, diffableProto);
+    fnParamGens.push_back(T);
+  }
+  // Generator for the first argument, i.e. the `@differentiable` function.
+  BuiltinFunctionBuilder::LambdaGenerator firstArgGen {
+    // Generator for the function type at the argument position, i.e. the
+    // function being differentiated.
+    [=, &fnParamGens](BuiltinFunctionBuilder &builder) -> Type {
+      FunctionType::ExtInfo ext;
+      auto extInfo = FunctionType::ExtInfo()
+          .withDifferentiabilityKind(DifferentiabilityKind::Normal)
+          .withNoEscape().withThrows(throws);
+      SmallVector<FunctionType::Param, 2> params;
+      for (auto &paramGen : fnParamGens)
+        params.push_back(FunctionType::Param(paramGen.build(builder)));
+      auto innerFunction = FunctionType::get(params,
+                                             fnResultGen.build(builder));
+      return innerFunction->withExtInfo(extInfo);
+    }
+  };
+  // Eagerly build the type of the first arg, then use that to compute the type
+  // of the result.
+  auto *diffFnType =
+      firstArgGen.build(builder)->castTo<AnyFunctionType>();
+  diffFnType = diffFnType->getWithoutDifferentiability()->withExtInfo(
+      diffFnType->getExtInfo().withNoEscape(false));
+  auto *paramIndices = IndexSubset::get(
+      Context, SmallBitVector(diffFnType->getNumParams(), true));
+  // Generator for the resultant function type, i.e. the AD derivative function.
+  BuiltinFunctionBuilder::LambdaGenerator resultGen{
+      [=, &Context](BuiltinFunctionBuilder &builder) -> Type {
+        auto derivativeFnTy = diffFnType->getAutoDiffDerivativeFunctionType(
+            paramIndices, kind,
+            LookUpConformanceInModule(Context.TheBuiltinModule));
+        return derivativeFnTy->getResult();
+      }};
+  builder.addParameter(firstArgGen);
+  for (auto argGen : fnParamGens)
+    builder.addParameter(argGen);
+  if (throws)
+    builder.setRethrows();
+  builder.setResult(resultGen);
+  return builder.build(Id);
+}
+
+static ValueDecl *getAutoDiffApplyTransposeFunction(
+    ASTContext &Context, Identifier Id, unsigned arity, bool throws) {
+  assert(arity >= 1);
+  // <...T...(arity), R>
+  //     (@differentiable (...T) throws -> R, ...R.TangentVector)
+  //         rethrows -> (...T.TangentVector)
+  unsigned numGenericParams = 1 + arity;
+  BuiltinFunctionBuilder builder(Context, numGenericParams);
+  auto *diffableProto = Context.getProtocol(KnownProtocolKind::Differentiable);
+  auto *addArithProto =
+      Context.getProtocol(KnownProtocolKind::AdditiveArithmetic);
+  // Create type parameters and add conformance constraints.
+  auto linearFnResultGen = makeGenericParam(arity);
+  builder.addConformanceRequirement(linearFnResultGen, diffableProto);
+  builder.addConformanceRequirement(linearFnResultGen, addArithProto);
+  SmallVector<decltype(linearFnResultGen), 2> linearFnParamGens;
+  for (auto i : range(arity)) {
+    auto T = makeGenericParam(i);
+    builder.addConformanceRequirement(T, diffableProto);
+    builder.addConformanceRequirement(T, addArithProto);
+    linearFnParamGens.push_back(T);
+  }
+  // Generator for the first argument, i.e. the `@differentiable(linear)`
+  // function.
+  BuiltinFunctionBuilder::LambdaGenerator firstArgGen {
+    // Generator for the function type at the argument position, i.e. the
+    // function being differentiated.
+    [=, &linearFnParamGens](BuiltinFunctionBuilder &builder) -> Type {
+      FunctionType::ExtInfo ext;
+      auto extInfo = FunctionType::ExtInfo()
+          .withDifferentiabilityKind(DifferentiabilityKind::Linear)
+          .withNoEscape().withThrows(throws);
+      SmallVector<FunctionType::Param, 2> params;
+      for (auto &paramGen : linearFnParamGens)
+        params.push_back(FunctionType::Param(paramGen.build(builder)));
+      auto innerFunction = FunctionType::get(params,
+                                             linearFnResultGen.build(builder));
+      return innerFunction->withExtInfo(extInfo);
+    }
+  };
+  builder.addParameter(firstArgGen);
+  builder.addParameter(linearFnResultGen);
+  if (throws)
+    builder.setRethrows();
+  if (arity == 1)
+    builder.setResult(linearFnParamGens.front());
+  else {
+    BuiltinFunctionBuilder::LambdaGenerator tupleResultGen {
+      [&](BuiltinFunctionBuilder &builder) -> Type {
+        SmallVector<TupleTypeElt, 2> tupleElts;
+        for (auto linearFnParamGen : linearFnParamGens)
+          tupleElts.push_back(linearFnParamGen.build(builder));
+        return TupleType::get(tupleElts, Context);
+      }
+    };
+    builder.setResult(tupleResultGen);
+  }
+  return builder.build(Id);
+}
+
+static ValueDecl *getDifferentiableFunctionConstructor(
+    ASTContext &Context, Identifier Id, unsigned arity, bool throws) {
+  assert(arity >= 1);
+  unsigned numGenericParams = 1 + arity;
+  BuiltinFunctionBuilder builder(Context, numGenericParams);
+  // Get the `Differentiable` and `AdditiveArithmetic` protocols.
+  auto *diffableProto =
+      Context.getProtocol(KnownProtocolKind::Differentiable);
+  auto *tangentVectorDecl =
+      diffableProto->getAssociatedType(Context.Id_TangentVector);
+  assert(tangentVectorDecl);
+  // Create type parameters and add conformance constraints.
+  auto origResultGen = makeGenericParam(arity);
+  builder.addConformanceRequirement(origResultGen, diffableProto);
+  SmallVector<decltype(origResultGen), 2> fnArgGens;
+  for (auto i : range(arity)) {
+    auto T = makeGenericParam(i);
+    builder.addConformanceRequirement(T, diffableProto);
+    fnArgGens.push_back(T);
+  }
+
+  BuiltinFunctionBuilder::LambdaGenerator origFnGen {
+    [=, &fnArgGens](BuiltinFunctionBuilder &builder) -> Type {
+      SmallVector<FunctionType::Param, 2> params;
+      for (auto &paramGen : fnArgGens)
+        params.push_back(FunctionType::Param(paramGen.build(builder)));
+      return FunctionType::get(params, origResultGen.build(builder))
+          ->withExtInfo(
+              FunctionType::ExtInfo(FunctionTypeRepresentation::Swift, throws));
+    }
+  };
+
+  BuiltinFunctionBuilder::LambdaGenerator jvpGen {
+    [=, &fnArgGens, &Context](BuiltinFunctionBuilder &builder) -> Type {
+      SmallVector<FunctionType::Param, 2> params;
+      for (auto &paramGen : fnArgGens)
+        params.push_back(FunctionType::Param(paramGen.build(builder)));
+      auto origResultType = origResultGen.build(builder);
+      SmallVector<FunctionType::Param, 2> differentialParams;
+      for (auto &param : params) {
+        auto tanType = DependentMemberType::get(
+            param.getPlainType(), tangentVectorDecl);
+        differentialParams.push_back(FunctionType::Param(tanType));
+      }
+      auto differentialResultType = DependentMemberType::get(
+          origResultType, tangentVectorDecl);
+      auto differentialType =
+          FunctionType::get({differentialParams}, differentialResultType);
+      auto jvpResultType = TupleType::get(
+          {TupleTypeElt(origResultType, Context.Id_value),
+           TupleTypeElt(differentialType, Context.Id_differential)}, Context);
+      return FunctionType::get(params, jvpResultType)
+          ->withExtInfo(
+              FunctionType::ExtInfo(FunctionTypeRepresentation::Swift, throws));
+    }
+  };
+
+  BuiltinFunctionBuilder::LambdaGenerator vjpGen {
+    [=, &fnArgGens, &Context](BuiltinFunctionBuilder &builder) -> Type {
+      SmallVector<FunctionType::Param, 2> params;
+      for (auto &paramGen : fnArgGens)
+        params.push_back(FunctionType::Param(paramGen.build(builder)));
+      auto origResultType = origResultGen.build(builder);
+      SmallVector<TupleTypeElt, 2> pullbackResultTupleElts;
+      for (auto &param : params) {
+        auto tanType = DependentMemberType::get(
+            param.getPlainType(), tangentVectorDecl);
+        pullbackResultTupleElts.push_back(TupleTypeElt(tanType));
+      }
+      auto pullbackParam = FunctionType::Param(
+            DependentMemberType::get(origResultType, tangentVectorDecl));
+      auto pullbackType = FunctionType::get(
+          {pullbackParam},
+          pullbackResultTupleElts.size() == 1
+              ? pullbackResultTupleElts.front().getType()
+              : TupleType::get(pullbackResultTupleElts, Context));
+      auto vjpResultType = TupleType::get(
+          {TupleTypeElt(origResultType, Context.Id_value),
+           TupleTypeElt(pullbackType, Context.Id_pullback)}, Context);
+      return FunctionType::get(params, vjpResultType)
+          ->withExtInfo(
+              FunctionType::ExtInfo(FunctionTypeRepresentation::Swift, throws));
+    }
+  };
+
+  BuiltinFunctionBuilder::LambdaGenerator resultGen {
+    [&](BuiltinFunctionBuilder &builder) -> Type {
+      auto origFnType = origFnGen.build(builder)->castTo<FunctionType>();
+      return origFnType->withExtInfo(
+          origFnType->getExtInfo()
+              .withDifferentiabilityKind(DifferentiabilityKind::Normal));
+    }
+  };
+
+  builder.addParameter(origFnGen, ValueOwnership::Owned);
+  builder.addParameter(jvpGen, ValueOwnership::Owned);
+  builder.addParameter(vjpGen, ValueOwnership::Owned);
+  builder.setResult(resultGen);
+  return builder.build(Id);
+}
+
+static ValueDecl *getLinearFunctionConstructor(
+    ASTContext &Context, Identifier Id, unsigned arity, bool throws) {
+  assert(arity >= 1);
+  unsigned numGenericParams = 1 + arity;
+  BuiltinFunctionBuilder builder(Context, numGenericParams);
+  // Get the `Differentiable` and `AdditiveArithmetic` protocols.
+  auto *diffableProto =
+      Context.getProtocol(KnownProtocolKind::Differentiable);
+  auto *addArithProto =
+      Context.getProtocol(KnownProtocolKind::AdditiveArithmetic);
+  // Create type parameters and add conformance constraints.
+  auto origResultGen = makeGenericParam(arity);
+  builder.addConformanceRequirement(origResultGen, diffableProto);
+  builder.addConformanceRequirement(origResultGen, addArithProto);
+  SmallVector<decltype(origResultGen), 2> fnArgGens;
+  for (auto i : range(arity)) {
+    auto T = makeGenericParam(i);
+    builder.addConformanceRequirement(T, diffableProto);
+    builder.addConformanceRequirement(T, addArithProto);
+    fnArgGens.push_back(T);
+  }
+
+  BuiltinFunctionBuilder::LambdaGenerator origFnGen {
+    [=, &fnArgGens](BuiltinFunctionBuilder &builder) -> Type {
+      SmallVector<FunctionType::Param, 2> params;
+      for (auto &paramGen : fnArgGens)
+        params.push_back(FunctionType::Param(paramGen.build(builder)));
+      return FunctionType::get(params, origResultGen.build(builder))
+          ->withExtInfo(
+              FunctionType::ExtInfo(FunctionTypeRepresentation::Swift, throws));
+    }
+  };
+
+  BuiltinFunctionBuilder::LambdaGenerator transposeFnGen {
+    [=, &fnArgGens, &Context](BuiltinFunctionBuilder &builder) -> Type {
+      auto origResultType = origResultGen.build(builder);
+      SmallVector<TupleTypeElt, 2> resultTupleElts;
+      for (auto &paramGen : fnArgGens)
+        resultTupleElts.push_back(paramGen.build(builder));
+      return FunctionType::get(
+          {FunctionType::Param(origResultType)},
+          resultTupleElts.size() == 1
+              ? resultTupleElts.front().getType()
+              : TupleType::get(resultTupleElts, Context));
+    }
+  };
+
+  BuiltinFunctionBuilder::LambdaGenerator resultGen {
+    [&](BuiltinFunctionBuilder &builder) -> Type {
+      auto origFnType = origFnGen.build(builder)->castTo<FunctionType>();
+      return origFnType->withExtInfo(
+          origFnType->getExtInfo()
+              .withDifferentiabilityKind(DifferentiabilityKind::Linear));
+    }
+  };
+
+  builder.addParameter(origFnGen, ValueOwnership::Owned);
+  builder.addParameter(transposeFnGen, ValueOwnership::Owned);
+  builder.setResult(resultGen);
+  return builder.build(Id);
+}
+
+
 
 static ValueDecl *getGlobalStringTablePointer(ASTContext &Context,
                                               Identifier Id) {
@@ -1501,8 +1856,9 @@ getSwiftFunctionTypeForIntrinsic(llvm::Intrinsic::ID ID,
   }
   
   // Translate LLVM function attributes to Swift function attributes.
-  llvm::AttributeList attrs =
-      llvm::Intrinsic::getAttributes(getGlobalLLVMContext(), ID);
+  IntrinsicInfo II;
+  II.ID = ID;
+  auto attrs = II.getOrCreateAttributes(Context);
   if (attrs.hasAttribute(llvm::AttributeList::FunctionIndex,
                          llvm::Attribute::NoReturn)) {
     ResultTy = Context.getNeverType();
@@ -1758,6 +2114,40 @@ ValueDecl *swift::getBuiltinValueDecl(ASTContext &Context, Identifier Id) {
 
     return getAllocWithTailElemsOperation(Context, Id, NumTailTypes);
   }
+  if (OperationName.startswith("applyDerivative_")) {
+    AutoDiffDerivativeFunctionKind kind;
+    unsigned arity;
+    bool throws;
+    if (!autodiff::getBuiltinApplyDerivativeConfig(
+            OperationName, kind, arity, throws))
+      return nullptr;
+    return getAutoDiffApplyDerivativeFunction(Context, Id, kind, arity,
+                                              throws);
+  }
+  if (OperationName.startswith("applyTranspose_")) {
+    unsigned arity;
+    bool throws;
+    if (!autodiff::getBuiltinApplyTransposeConfig(
+            OperationName, arity, throws))
+      return nullptr;
+    return getAutoDiffApplyTransposeFunction(Context, Id, arity, throws);
+  }
+  if (OperationName.startswith("differentiableFunction_")) {
+    unsigned arity;
+    bool throws;
+    if (!autodiff::getBuiltinDifferentiableOrLinearFunctionConfig(
+            OperationName, arity, throws))
+      return nullptr;
+    return getDifferentiableFunctionConstructor(Context, Id, arity, throws);
+  }
+  if (OperationName.startswith("linearFunction_")) {
+    unsigned arity;
+    bool throws;
+    if (!autodiff::getBuiltinDifferentiableOrLinearFunctionConfig(
+          OperationName, arity, throws))
+      return nullptr;
+    return getLinearFunctionConstructor(Context, Id, arity, throws);
+  }
 
   auto BV = llvm::StringSwitch<BuiltinValueKind>(OperationName)
 #define BUILTIN(id, name, Attrs) .Case(name, BuiltinValueKind::id)
@@ -1891,8 +2281,15 @@ ValueDecl *swift::getBuiltinValueDecl(ASTContext &Context, Identifier Id) {
 
   case BuiltinValueKind::IsUnique:
   case BuiltinValueKind::IsUnique_native:
+  case BuiltinValueKind::BeginCOWMutation:
+  case BuiltinValueKind::BeginCOWMutation_native:
     if (!Types.empty()) return nullptr;
+    // BeginCOWMutation has the same signature as IsUnique.
     return getIsUniqueOperation(Context, Id);
+
+  case BuiltinValueKind::EndCOWMutation:
+    if (!Types.empty()) return nullptr;
+    return getEndCOWMutation(Context, Id);
 
   case BuiltinValueKind::BindMemory:
     if (!Types.empty()) return nullptr;
@@ -2022,11 +2419,21 @@ ValueDecl *swift::getBuiltinValueDecl(ASTContext &Context, Identifier Id) {
     if (!Types.empty())
       return nullptr;
     return getValueToBridgeObject(Context, Id);
+
+  case BuiltinValueKind::COWBufferForReading:
+    return getCOWBufferForReading(Context, Id);
+
   case BuiltinValueKind::UnsafeGuaranteed:
     return getUnsafeGuaranteed(Context, Id);
 
   case BuiltinValueKind::UnsafeGuaranteedEnd:
     return getUnsafeGuaranteedEnd(Context, Id);
+
+  case BuiltinValueKind::ApplyDerivative:
+  case BuiltinValueKind::ApplyTranspose:
+  case BuiltinValueKind::DifferentiableFunction:
+  case BuiltinValueKind::LinearFunction:
+    llvm_unreachable("Handled above");
 
   case BuiltinValueKind::OnFastPath:
     return getOnFastPath(Context, Id);

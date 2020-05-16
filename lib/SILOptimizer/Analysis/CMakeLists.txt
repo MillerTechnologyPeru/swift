@@ -10,6 +10,7 @@ silopt_register_sources(
   ClassHierarchyAnalysis.cpp
   ClosureScope.cpp
   ColdBlockInfo.cpp
+  DifferentiableActivityAnalysis.cpp
   DestructorAnalysis.cpp
   EscapeAnalysis.cpp
   EpilogueARCAnalysis.cpp

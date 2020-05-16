@@ -74,6 +74,12 @@ ConstraintSystem::ConstraintSystem(DeclContext *dc,
     CG(*new ConstraintGraph(*this))
 {
   assert(DC && "context required");
+  // Respect the global debugging flag, but turn off debugging while
+  // parsing and loading other modules.
+  if (Context.TypeCheckerOpts.DebugConstraintSolver &&
+      DC->getParentModule()->isMainModule()) {
+    Options |= ConstraintSystemFlags::DebugConstraints;
+  }
 }
 
 ConstraintSystem::~ConstraintSystem() {
@@ -170,7 +176,7 @@ void ConstraintSystem::assignFixedType(TypeVariableType *typeVar, Type type,
       if (!locator || !locator->getPath().empty())
         continue;
 
-      auto anchor = locator->getAnchor();
+      auto *anchor = getAsExpr(locator->getAnchor());
       if (!anchor)
         continue;
 
@@ -216,9 +222,19 @@ getDynamicResultSignature(ValueDecl *decl) {
   }
 
   if (auto asd = dyn_cast<AbstractStorageDecl>(decl)) {
+    auto ty = asd->getInterfaceType();
+
+    // Strip off a generic signature if we have one. This matches the logic
+    // for methods, and ensures that we don't take a protocol's generic
+    // signature into account for a subscript requirement.
+    if (auto *genericFn = ty->getAs<GenericFunctionType>()) {
+      ty = FunctionType::get(genericFn->getParams(), genericFn->getResult(),
+                             genericFn->getExtInfo());
+    }
+
     // Handle properties and subscripts, anchored by the getter's selector.
     return std::make_tuple(asd->isStatic(), asd->getObjCGetterSelector(),
-                           asd->getInterfaceType()->getCanonicalType());
+                           ty->getCanonicalType());
   }
 
   llvm_unreachable("Not a valid @objc member");
@@ -364,15 +380,14 @@ getAlternativeLiteralTypes(KnownProtocolKind kind) {
 }
 
 ConstraintLocator *ConstraintSystem::getConstraintLocator(
-    Expr *anchor, ArrayRef<ConstraintLocator::PathElement> path) {
+    ASTNode anchor, ArrayRef<ConstraintLocator::PathElement> path) {
   auto summaryFlags = ConstraintLocator::getSummaryFlagsForPath(path);
   return getConstraintLocator(anchor, path, summaryFlags);
 }
 
 ConstraintLocator *ConstraintSystem::getConstraintLocator(
-                     Expr *anchor,
-                     ArrayRef<ConstraintLocator::PathElement> path,
-                     unsigned summaryFlags) {
+    ASTNode anchor, ArrayRef<ConstraintLocator::PathElement> path,
+    unsigned summaryFlags) {
   assert(summaryFlags == ConstraintLocator::getSummaryFlagsForPath(path));
 
   // Check whether a locator with this anchor + path already exists.
@@ -399,7 +414,7 @@ ConstraintLocator *ConstraintSystem::getConstraintLocator(
 
   // We have to build a new locator. Extract the paths from the builder.
   SmallVector<LocatorPathElt, 4> path;
-  Expr *anchor = builder.getLocatorParts(path);
+  auto anchor = builder.getLocatorParts(path);
   return getConstraintLocator(anchor, path, builder.getSummaryFlags());
 }
 
@@ -417,19 +432,19 @@ ConstraintLocator *ConstraintSystem::getConstraintLocator(
     const ConstraintLocatorBuilder &builder,
     ArrayRef<ConstraintLocator::PathElement> newElts) {
   SmallVector<ConstraintLocator::PathElement, 4> newPath;
-  auto *anchor = builder.getLocatorParts(newPath);
+  auto anchor = builder.getLocatorParts(newPath);
   newPath.append(newElts.begin(), newElts.end());
   return getConstraintLocator(anchor, newPath);
 }
 
 ConstraintLocator *ConstraintSystem::getCalleeLocator(
     ConstraintLocator *locator, bool lookThroughApply,
-    llvm::function_ref<Type(const Expr *)> getType,
+    llvm::function_ref<Type(Expr *)> getType,
     llvm::function_ref<Type(Type)> simplifyType,
     llvm::function_ref<Optional<SelectedOverload>(ConstraintLocator *)>
         getOverloadFor) {
-  auto *anchor = locator->getAnchor();
-  assert(anchor && "Expected an anchor!");
+  auto anchor = locator->getAnchor();
+  assert(bool(anchor) && "Expected an anchor!");
 
   auto path = locator->getPath();
   {
@@ -451,7 +466,7 @@ ConstraintLocator *ConstraintSystem::getCalleeLocator(
   // may have a callee given by a property or subscript component.
   if (auto componentElt =
           locator->getFirstElementAs<LocatorPathElt::KeyPathComponent>()) {
-    auto *kpExpr = cast<KeyPathExpr>(anchor);
+    auto *kpExpr = castToExpr<KeyPathExpr>(anchor);
     auto component = kpExpr->getComponents()[componentElt->getIndex()];
 
     using ComponentKind = KeyPathExpr::Component::Kind;
@@ -481,7 +496,7 @@ ConstraintLocator *ConstraintSystem::getCalleeLocator(
   // Make sure we handle subscripts before looking at apply exprs. We don't
   // want to return a subscript member locator for an expression such as x[](y),
   // as its callee is not the subscript, but rather the function it returns.
-  if (isa<SubscriptExpr>(anchor))
+  if (isExpr<SubscriptExpr>(anchor))
     return getConstraintLocator(anchor, ConstraintLocator::SubscriptMember);
 
   auto getSpecialFnCalleeLoc = [&](Type fnTy) -> ConstraintLocator * {
@@ -515,7 +530,7 @@ ConstraintLocator *ConstraintSystem::getCalleeLocator(
   };
 
   if (lookThroughApply) {
-    if (auto *applyExpr = dyn_cast<ApplyExpr>(anchor)) {
+    if (auto *applyExpr = getAsExpr<ApplyExpr>(anchor)) {
       auto *fnExpr = applyExpr->getFn();
 
       // Handle special cases for applies of non-function types.
@@ -525,7 +540,7 @@ ConstraintLocator *ConstraintSystem::getCalleeLocator(
       // Otherwise fall through and look for locators anchored on the function
       // expr. For CallExprs, this can look through things like parens and
       // optional chaining.
-      if (auto *callExpr = dyn_cast<CallExpr>(anchor)) {
+      if (auto *callExpr = getAsExpr<CallExpr>(anchor)) {
         anchor = callExpr->getDirectCallee();
       } else {
         anchor = fnExpr;
@@ -533,14 +548,14 @@ ConstraintLocator *ConstraintSystem::getCalleeLocator(
     }
   }
 
-  if (auto *UDE = dyn_cast<UnresolvedDotExpr>(anchor)) {
+  if (auto *UDE = getAsExpr<UnresolvedDotExpr>(anchor)) {
     return getConstraintLocator(
         anchor, TypeChecker::getSelfForInitDelegationInConstructor(DC, UDE)
                     ? ConstraintLocator::ConstructorMember
                     : ConstraintLocator::Member);
   }
 
-  if (auto *UME = dyn_cast<UnresolvedMemberExpr>(anchor)) {
+  if (auto *UME = getAsExpr<UnresolvedMemberExpr>(anchor)) {
     auto *calleeLoc =
         getConstraintLocator(UME, ConstraintLocator::UnresolvedMember);
 
@@ -558,7 +573,7 @@ ConstraintLocator *ConstraintSystem::getCalleeLocator(
     return calleeLoc;
   }
 
-  if (isa<MemberRefExpr>(anchor))
+  if (isExpr<MemberRefExpr>(anchor))
     return getConstraintLocator(anchor, ConstraintLocator::Member);
 
   return getConstraintLocator(anchor);
@@ -652,8 +667,8 @@ Type ConstraintSystem::openUnboundGenericType(UnboundGenericType *unbound,
   // handle generic TypeAliases elsewhere, this can just become a
   // call to BoundGenericType::get().
   return TypeChecker::applyUnboundGenericArguments(
-      unbound, unboundDecl,
-      SourceLoc(), TypeResolution::forContextual(DC), arguments);
+      unbound, unboundDecl, SourceLoc(),
+      TypeResolution::forContextual(DC, None), arguments);
 }
 
 static void checkNestedTypeConstraints(ConstraintSystem &cs, Type type,
@@ -976,7 +991,7 @@ void ConstraintSystem::recordOpenedTypes(
 
   // If the last path element is an archetype or associated type, ignore it.
   SmallVector<LocatorPathElt, 2> pathElts;
-  Expr *anchor = locator.getLocatorParts(pathElts);
+  auto anchor = locator.getLocatorParts(pathElts);
   if (!pathElts.empty() &&
       pathElts.back().getKind() == ConstraintLocator::GenericParameter)
     return;
@@ -1091,10 +1106,9 @@ ConstraintSystem::getTypeOfReference(ValueDecl *value,
   if (auto typeDecl = dyn_cast<TypeDecl>(value)) {
     // Resolve the reference to this type declaration in our current context.
     auto type = TypeChecker::resolveTypeInContext(
-                                      typeDecl, nullptr,
-                                      TypeResolution::forContextual(useDC),
-                                      TypeResolverContext::InExpression,
-                                      /*isSpecialized=*/false);
+        typeDecl, nullptr,
+        TypeResolution::forContextual(useDC, TypeResolverContext::InExpression),
+        /*isSpecialized=*/false);
 
     checkNestedTypeConstraints(*this, type, locator);
 
@@ -1549,7 +1563,6 @@ Type ConstraintSystem::getEffectiveOverloadType(const OverloadChoice &overload,
     // Declaration choices are handled below.
     break;
 
-  case OverloadChoiceKind::BaseType:
   case OverloadChoiceKind::DeclViaBridge:
   case OverloadChoiceKind::DeclViaDynamic:
   case OverloadChoiceKind::DeclViaUnwrappedOptional:
@@ -1695,7 +1708,11 @@ void ConstraintSystem::addOverloadSet(ArrayRef<Constraint *> choices,
     return;
   }
 
-  addDisjunctionConstraint(choices, locator, ForgetChoice);
+  auto *disjunction =
+      Constraint::createDisjunction(*this, choices, locator, ForgetChoice);
+  addUnsolvedConstraint(disjunction);
+  if (simplifyAppliedOverloads(disjunction, locator))
+    retireFailedConstraint(disjunction);
 }
 
 /// If we're resolving an overload set with a decl that has special type
@@ -1810,7 +1827,7 @@ static std::pair<bool, unsigned>
 isInvalidPartialApplication(ConstraintSystem &cs,
                             const AbstractFunctionDecl *member,
                             ConstraintLocator *locator) {
-  auto *UDE = dyn_cast_or_null<UnresolvedDotExpr>(locator->getAnchor());
+  auto *UDE = getAsExpr<UnresolvedDotExpr>(locator->getAnchor());
   if (UDE == nullptr)
     return {false,0};
 
@@ -1918,7 +1935,6 @@ std::pair<Type, bool> ConstraintSystem::adjustTypeOfOverloadReference(
   case OverloadChoiceKind::DeclViaBridge:
   case OverloadChoiceKind::DeclViaUnwrappedOptional:
   case OverloadChoiceKind::TupleIndex:
-  case OverloadChoiceKind::BaseType:
   case OverloadChoiceKind::KeyPathApplication:
     return {refType, bindConstraintCreated};
   case OverloadChoiceKind::DeclViaDynamic: {
@@ -2020,7 +2036,6 @@ void ConstraintSystem::bindOverloadType(
   case OverloadChoiceKind::DeclViaBridge:
   case OverloadChoiceKind::DeclViaUnwrappedOptional:
   case OverloadChoiceKind::TupleIndex:
-  case OverloadChoiceKind::BaseType:
   case OverloadChoiceKind::KeyPathApplication:
   case OverloadChoiceKind::DeclViaDynamic:
     bindTypeOrIUO(openedType);
@@ -2048,7 +2063,7 @@ void ConstraintSystem::bindOverloadType(
 
     // If this is used inside of the keypath expression, we need to make
     // sure that argument is Hashable.
-    if (isa<KeyPathExpr>(locator->getAnchor()))
+    if (isExpr<KeyPathExpr>(locator->getAnchor()))
       verifyThatArgumentIsHashable(0, argType, locator);
 
     // The resolved decl is for subscript(dynamicMember:), however the original
@@ -2170,7 +2185,7 @@ void ConstraintSystem::bindOverloadType(
       addConstraint(ConstraintKind::Equal, memberTy, leafTy, keyPathLoc);
     }
 
-    if (isa<KeyPathExpr>(locator->getAnchor()))
+    if (isExpr<KeyPathExpr>(locator->getAnchor()))
       verifyThatArgumentIsHashable(0, keyPathTy, locator);
 
     // The resolved decl is for subscript(dynamicMember:), however the
@@ -2246,7 +2261,7 @@ void ConstraintSystem::resolveOverload(ConstraintLocator *locator,
           return nullptr;
         }
       };
-      auto anchor = locator ? locator->getAnchor() : nullptr;
+      auto *anchor = locator ? getAsExpr(locator->getAnchor()) : nullptr;
       auto base = getDotBase(anchor);
       std::tie(openedFullType, refType)
         = getTypeOfMemberReference(baseTy, choice.getDecl(), useDC,
@@ -2271,10 +2286,6 @@ void ConstraintSystem::resolveOverload(ConstraintLocator *locator,
         adjustTypeOfOverloadReference(choice, locator, boundType, refType);
     break;
   }
-
-  case OverloadChoiceKind::BaseType:
-    refType = choice.getBaseType();
-    break;
 
   case OverloadChoiceKind::TupleIndex:
     if (auto lvalueTy = choice.getBaseType()->getAs<LValueType>()) {
@@ -2403,7 +2414,7 @@ void ConstraintSystem::resolveOverload(ConstraintLocator *locator,
                      verifyThatArgumentIsHashable);
   }
 
-  if (getASTContext().TypeCheckerOpts.DebugConstraintSolver) {
+  if (isDebugMode()) {
     PrintOptions PO;
     PO.PrintTypesForDebugging = true;
     auto &log = getASTContext().TypeCheckerDebug->getStream();
@@ -2513,13 +2524,15 @@ size_t Solution::getTotalMemory() const {
          Conformances.size() * sizeof(std::pair<ConstraintLocator *, ProtocolConformanceRef>);
 }
 
+DeclContext *Solution::getDC() const { return constraintSystem->DC; }
+
 DeclName OverloadChoice::getName() const {
   switch (getKind()) {
     case OverloadChoiceKind::Decl:
     case OverloadChoiceKind::DeclViaDynamic:
     case OverloadChoiceKind::DeclViaBridge:
     case OverloadChoiceKind::DeclViaUnwrappedOptional:
-      return getDecl()->getFullName();
+      return getDecl()->getName();
 
     case OverloadChoiceKind::KeyPathApplication:
       // TODO: This should probably produce subscript(keyPath:), but we
@@ -2532,7 +2545,6 @@ DeclName OverloadChoice::getName() const {
     case OverloadChoiceKind::KeyPathDynamicMemberLookup:
       return DeclName(DynamicMember.getPointer());
 
-    case OverloadChoiceKind::BaseType:
     case OverloadChoiceKind::TupleIndex:
       llvm_unreachable("no name!");
   }
@@ -2565,7 +2577,7 @@ bool OverloadChoice::isImplicitlyUnwrappedValueOrReturnValue() const {
 
 SolutionResult ConstraintSystem::salvage() {
   auto &ctx = getASTContext();
-  if (ctx.TypeCheckerOpts.DebugConstraintSolver) {
+  if (isDebugMode()) {
     auto &log = ctx.TypeCheckerDebug->getStream();
     log << "---Attempting to salvage and emit diagnostics---\n";
   }
@@ -2613,7 +2625,7 @@ SolutionResult ConstraintSystem::salvage() {
 
     // If there are multiple solutions, try to diagnose an ambiguity.
     if (viable.size() > 1) {
-      if (getASTContext().TypeCheckerOpts.DebugConstraintSolver) {
+      if (isDebugMode()) {
         auto &log = getASTContext().TypeCheckerDebug->getStream();
         log << "---Ambiguity error: " << viable.size()
             << " solutions found---\n";
@@ -2645,11 +2657,8 @@ static void diagnoseOperatorAmbiguity(ConstraintSystem &cs,
                                       ArrayRef<Solution> solutions,
                                       ConstraintLocator *locator) {
   auto &DE = cs.getASTContext().Diags;
-  auto *anchor = locator->getAnchor();
-
-  auto *applyExpr = dyn_cast_or_null<ApplyExpr>(cs.getParentExpr(anchor));
-  if (!applyExpr)
-    return;
+  auto *anchor = castToExpr(locator->getAnchor());
+  auto *applyExpr = cast<ApplyExpr>(cs.getParentExpr(anchor));
 
   auto isNameOfStandardComparisonOperator = [](Identifier opName) -> bool {
     return opName.is("==") || opName.is("!=") || opName.is("===") ||
@@ -2750,7 +2759,7 @@ std::string swift::describeGenericType(ValueDecl *GP, bool includeName) {
   OS << Decl::getDescriptiveKindName(parent->getDescriptiveKind());
   if (auto *decl = dyn_cast<ValueDecl>(parent)) {
     if (decl->hasName())
-      OS << " '" << decl->getFullName() << "'";
+      OS << " '" << decl->getName() << "'";
   }
 
   return OS.str().str();
@@ -2771,14 +2780,22 @@ static bool diagnoseConflictingGenericArguments(ConstraintSystem &cs,
   if (!diff.overloads.empty())
     return false;
 
-  if (!llvm::all_of(solutions, [](const Solution &solution) -> bool {
+  bool noFixes = llvm::all_of(solutions, [](const Solution &solution) -> bool {
+     const auto score = solution.getFixedScore();
+     return score.Data[SK_Fix] == 0 && solution.Fixes.empty();
+  });
+
+  bool allMismatches =
+      llvm::all_of(solutions, [](const Solution &solution) -> bool {
         return llvm::all_of(
             solution.Fixes, [](const ConstraintFix *fix) -> bool {
               return fix->getKind() == FixKind::AllowArgumentTypeMismatch ||
                      fix->getKind() == FixKind::AllowFunctionTypeMismatch ||
                      fix->getKind() == FixKind::AllowTupleTypeMismatch;
             });
-      }))
+      });
+
+  if (!noFixes && !allMismatches)
     return false;
 
   auto &DE = cs.getASTContext().Diags;
@@ -2805,7 +2822,7 @@ static bool diagnoseConflictingGenericArguments(ConstraintSystem &cs,
       if (auto *reprGP = repr->getImpl().getGenericParameter())
         GP = reprGP;
 
-      genericParams[repr] = {GP, locator->getAnchor()->getLoc()};
+      genericParams[repr] = {GP, getLoc(locator->getAnchor())};
     }
   }
 
@@ -2931,6 +2948,11 @@ bool ConstraintSystem::diagnoseAmbiguityWithFixes(
   if (solutions.empty())
     return false;
 
+  SolutionDiff solutionDiff(solutions);
+
+  if (diagnoseConflictingGenericArguments(*this, solutionDiff, solutions))
+    return true;
+  
   if (auto bestScore = solverState->BestScore) {
     solutions.erase(llvm::remove_if(solutions,
                                     [&](const Solution &solution) {
@@ -2946,21 +2968,19 @@ bool ConstraintSystem::diagnoseAmbiguityWithFixes(
       return false;
   }
 
-  SolutionDiff solutionDiff(solutions);
-
-  if (diagnoseConflictingGenericArguments(*this, solutionDiff, solutions))
-    return true;
-
   if (diagnoseAmbiguityWithEphemeralPointers(*this, solutions))
     return true;
 
   // Collect aggregated fixes from all solutions
-  llvm::SmallMapVector<std::pair<ConstraintLocator *, FixKind>,
-                       llvm::TinyPtrVector<ConstraintFix *>, 4>
+  using LocatorAndKind = std::pair<ConstraintLocator *, FixKind>;
+  using SolutionAndFix = std::pair<const Solution *, const ConstraintFix *>;
+  llvm::SmallMapVector<LocatorAndKind, llvm::SmallVector<SolutionAndFix, 4>, 4>
       aggregatedFixes;
   for (const auto &solution : solutions) {
-    for (auto *fix : solution.Fixes)
-      aggregatedFixes[{fix->getLocator(), fix->getKind()}].push_back(fix);
+    for (const auto *fix : solution.Fixes) {
+      LocatorAndKind key(fix->getLocator(), fix->getKind());
+      aggregatedFixes[key].emplace_back(&solution, fix);
+    }
   }
 
   // If there is an overload difference, let's see if there's a common callee
@@ -2969,16 +2989,16 @@ bool ConstraintSystem::diagnoseAmbiguityWithFixes(
       [&](const auto &overloadDiff) {
         return llvm::all_of(aggregatedFixes, [&](const auto &aggregatedFix) {
           auto *locator = aggregatedFix.first.first;
-          auto *anchor = locator->getAnchor();
+          auto anchor = locator->getAnchor();
           // Assignment failures are all about the source expression, because
           // they treat destination as a contextual type.
-          if (auto *assignExpr = dyn_cast<AssignExpr>(anchor))
+          if (auto *assignExpr = getAsExpr<AssignExpr>(anchor))
             anchor = assignExpr->getSrc();
 
-          if (auto *callExpr = dyn_cast<CallExpr>(anchor)) {
+          if (auto *callExpr = getAsExpr<CallExpr>(anchor)) {
             if (!isa<TypeExpr>(callExpr->getDirectCallee()))
               anchor = callExpr->getDirectCallee();
-          } else if (auto *applyExpr = dyn_cast<ApplyExpr>(anchor)) {
+          } else if (auto *applyExpr = getAsExpr<ApplyExpr>(anchor)) {
             anchor = applyExpr->getFn();
           }
 
@@ -2991,8 +3011,11 @@ bool ConstraintSystem::diagnoseAmbiguityWithFixes(
     bool diagnosed = false;
     for (auto fixes: aggregatedFixes) {
       // A common fix must appear in all solutions
-      if (fixes.second.size() < solutions.size()) continue;
-      diagnosed |= fixes.second.front()->diagnoseForAmbiguity(solutions);
+      auto &commonFixes = fixes.second;
+      if (commonFixes.size() != solutions.size()) continue;
+
+      auto *firstFix = commonFixes.front().second;
+      diagnosed |= firstFix->diagnoseForAmbiguity(commonFixes);
     }
     return diagnosed;
   }
@@ -3005,32 +3028,45 @@ bool ConstraintSystem::diagnoseAmbiguityWithFixes(
   {
     DiagnosticTransaction transaction(getASTContext().Diags);
 
-    auto *commonAnchor = commonCalleeLocator->getAnchor();
-    if (auto *callExpr = dyn_cast<CallExpr>(commonAnchor))
+    auto commonAnchor = commonCalleeLocator->getAnchor();
+    if (auto *callExpr = getAsExpr<CallExpr>(commonAnchor))
       commonAnchor = callExpr->getDirectCallee();
     auto &DE = getASTContext().Diags;
-    auto name = decl->getFullName();
+    const auto name = decl->getName();
 
     // Emit an error message for the ambiguity.
     if (aggregatedFixes.size() == 1 &&
         aggregatedFixes.front().first.first->isForContextualType()) {
-      auto *anchor = aggregatedFixes.front().first.first->getAnchor();
+      auto anchor = aggregatedFixes.front().first.first->getAnchor();
       auto baseName = name.getBaseName();
-      DE.diagnose(commonAnchor->getLoc(), diag::no_candidates_match_result_type,
+      DE.diagnose(getLoc(commonAnchor), diag::no_candidates_match_result_type,
                   baseName.userFacingName(), getContextualType(anchor));
     } else if (name.isOperator()) {
-      diagnoseOperatorAmbiguity(*this, name.getBaseIdentifier(), solutions,
-                                commonCalleeLocator);
-      return true;
+      auto *anchor = castToExpr(commonCalleeLocator->getAnchor());
+
+      // If operator is "applied" e.g. `1 + 2` there are tailored
+      // diagnostics in case of ambiguity, but if it's referenced
+      // e.g. `arr.sort(by: <)` it's better to produce generic error
+      // and a note per candidate.
+      if (auto *parentExpr = getParentExpr(anchor)) {
+        if (isa<ApplyExpr>(parentExpr)) {
+          diagnoseOperatorAmbiguity(*this, name.getBaseIdentifier(), solutions,
+                                    commonCalleeLocator);
+          return true;
+        }
+      }
+
+      DE.diagnose(anchor->getLoc(), diag::no_overloads_match_exactly_in_call,
+                  /*isApplication=*/false, decl->getDescriptiveKind(),
+                  name.isSpecial(), name.getBaseName());
     } else {
       bool isApplication =
           llvm::any_of(ArgumentInfos, [&](const auto &argInfo) {
             return argInfo.first->getAnchor() == commonAnchor;
           });
 
-      DE.diagnose(commonAnchor->getLoc(),
-                  diag::no_overloads_match_exactly_in_call,
-                  isApplication,
+      DE.diagnose(getLoc(commonAnchor),
+                  diag::no_overloads_match_exactly_in_call, isApplication,
                   decl->getDescriptiveKind(), name.isSpecial(),
                   name.getBaseName());
     }
@@ -3064,7 +3100,7 @@ bool ConstraintSystem::diagnoseAmbiguityWithFixes(
         // Emit a general "found candidate" note
         if (decl->getLoc().isInvalid()) {
           if (candidateTypes.insert(type->getCanonicalType()).second)
-            DE.diagnose(commonAnchor->getLoc(), diag::found_candidate_type, type);
+            DE.diagnose(getLoc(commonAnchor), diag::found_candidate_type, type);
         } else {
           DE.diagnose(decl->getLoc(), diag::found_candidate);
         }
@@ -3098,7 +3134,7 @@ static DeclName getOverloadChoiceName(ArrayRef<OverloadChoice> choices) {
     if (!choice.isDecl())
       continue;
 
-    DeclName nextName = choice.getDecl()->getFullName();
+    const DeclName nextName = choice.getDecl()->getName();
     if (!name) {
       name = nextName;
       continue;
@@ -3167,15 +3203,16 @@ bool ConstraintSystem::diagnoseAmbiguity(ArrayRef<Solution> solutions) {
 
     // If we can't resolve the locator to an anchor expression with no path,
     // we can't diagnose this well.
-    auto *anchor = simplifyLocatorToAnchor(overload.locator);
+    auto *anchor = getAsExpr(simplifyLocatorToAnchor(overload.locator));
     if (!anchor)
       continue;
-    auto it = indexMap.find(anchor);
+
+    auto it = indexMap.find(castToExpr(anchor));
     if (it == indexMap.end())
       continue;
     unsigned index = it->second;
 
-    auto optDepth = getExprDepth(anchor);
+    auto optDepth = getExprDepth(castToExpr(anchor));
     if (!optDepth)
       continue;
     unsigned depth = *optDepth;
@@ -3214,7 +3251,7 @@ bool ConstraintSystem::diagnoseAmbiguity(ArrayRef<Solution> solutions) {
 
     // Emit the ambiguity diagnostic.
     auto &DE = getASTContext().Diags;
-    DE.diagnose(anchor->getLoc(),
+    DE.diagnose(getLoc(anchor),
                 name.isOperator() ? diag::ambiguous_operator_ref
                                   : diag::ambiguous_decl_ref,
                 name);
@@ -3246,7 +3283,6 @@ bool ConstraintSystem::diagnoseAmbiguity(ArrayRef<Solution> solutions) {
         // want them to noise up unrelated subscript diagnostics.
         break;
 
-      case OverloadChoiceKind::BaseType:
       case OverloadChoiceKind::TupleIndex:
         // FIXME: Actually diagnose something here.
         break;
@@ -3283,7 +3319,7 @@ constraints::simplifyLocator(ConstraintSystem &cs, ConstraintLocator *locator,
   return cs.getConstraintLocator(anchor, path);
 }
 
-void constraints::simplifyLocator(Expr *&anchor,
+void constraints::simplifyLocator(ASTNode &anchor,
                                   ArrayRef<LocatorPathElt> &path,
                                   SourceRange &range) {
   range = SourceRange();
@@ -3292,25 +3328,25 @@ void constraints::simplifyLocator(Expr *&anchor,
     switch (path[0].getKind()) {
     case ConstraintLocator::ApplyArgument: {
       // Extract application argument.
-      if (auto applyExpr = dyn_cast<ApplyExpr>(anchor)) {
+      if (auto applyExpr = getAsExpr<ApplyExpr>(anchor)) {
         anchor = applyExpr->getArg();
         path = path.slice(1);
         continue;
       }
 
-      if (auto subscriptExpr = dyn_cast<SubscriptExpr>(anchor)) {
+      if (auto subscriptExpr = getAsExpr<SubscriptExpr>(anchor)) {
         anchor = subscriptExpr->getIndex();
         path = path.slice(1);
         continue;
       }
 
-      if (auto objectLiteralExpr = dyn_cast<ObjectLiteralExpr>(anchor)) {
+      if (auto objectLiteralExpr = getAsExpr<ObjectLiteralExpr>(anchor)) {
         anchor = objectLiteralExpr->getArg();
         path = path.slice(1);
         continue;
       }
 
-      if (auto *UME = dyn_cast<UnresolvedMemberExpr>(anchor)) {
+      if (auto *UME = getAsExpr<UnresolvedMemberExpr>(anchor)) {
         anchor = UME->getArgument();
         path = path.slice(1);
         continue;
@@ -3325,21 +3361,21 @@ void constraints::simplifyLocator(Expr *&anchor,
 
     case ConstraintLocator::ApplyFunction:
       // Extract application function.
-      if (auto applyExpr = dyn_cast<ApplyExpr>(anchor)) {
+      if (auto applyExpr = getAsExpr<ApplyExpr>(anchor)) {
         anchor = applyExpr->getFn();
         path = path.slice(1);
         continue;
       }
 
       // The subscript itself is the function.
-      if (auto subscriptExpr = dyn_cast<SubscriptExpr>(anchor)) {
+      if (auto subscriptExpr = getAsExpr<SubscriptExpr>(anchor)) {
         anchor = subscriptExpr;
         path = path.slice(1);
         continue;
       }
 
       // The unresolved member itself is the function.
-      if (auto unresolvedMember = dyn_cast<UnresolvedMemberExpr>(anchor)) {
+      if (auto unresolvedMember = getAsExpr<UnresolvedMemberExpr>(anchor)) {
         if (unresolvedMember->getArgument()) {
           anchor = unresolvedMember;
           path = path.slice(1);
@@ -3365,7 +3401,7 @@ void constraints::simplifyLocator(Expr *&anchor,
       // Extract tuple element.
       auto elt = path[0].castTo<LocatorPathElt::AnyTupleElement>();
       unsigned index = elt.getIndex();
-      if (auto tupleExpr = dyn_cast<TupleExpr>(anchor)) {
+      if (auto tupleExpr = getAsExpr<TupleExpr>(anchor)) {
         if (index < tupleExpr->getNumElements()) {
           anchor = tupleExpr->getElement(index);
           path = path.slice(1);
@@ -3373,7 +3409,7 @@ void constraints::simplifyLocator(Expr *&anchor,
         }
       }
 
-      if (auto *CE = dyn_cast<CollectionExpr>(anchor)) {
+      if (auto *CE = getAsExpr<CollectionExpr>(anchor)) {
         if (index < CE->getNumElements()) {
           anchor = CE->getElement(index);
           path = path.slice(1);
@@ -3386,7 +3422,7 @@ void constraints::simplifyLocator(Expr *&anchor,
     case ConstraintLocator::ApplyArgToParam: {
       auto elt = path[0].castTo<LocatorPathElt::ApplyArgToParam>();
       // Extract tuple element.
-      if (auto tupleExpr = dyn_cast<TupleExpr>(anchor)) {
+      if (auto tupleExpr = getAsExpr<TupleExpr>(anchor)) {
         unsigned index = elt.getArgIdx();
         if (index < tupleExpr->getNumElements()) {
           anchor = tupleExpr->getElement(index);
@@ -3396,7 +3432,7 @@ void constraints::simplifyLocator(Expr *&anchor,
       }
 
       // Extract subexpression in parentheses.
-      if (auto parenExpr = dyn_cast<ParenExpr>(anchor)) {
+      if (auto parenExpr = getAsExpr<ParenExpr>(anchor)) {
         // This simplication request could be for a synthesized argument.
         if (elt.getArgIdx() == 0) {
           anchor = parenExpr->getSubExpr();
@@ -3407,7 +3443,7 @@ void constraints::simplifyLocator(Expr *&anchor,
       break;
     }
     case ConstraintLocator::ConstructorMember:
-      if (auto typeExpr = dyn_cast<TypeExpr>(anchor)) {
+      if (auto typeExpr = getAsExpr<TypeExpr>(anchor)) {
         // This is really an implicit 'init' MemberRef, so point at the base,
         // i.e. the TypeExpr.
         range = SourceRange();
@@ -3419,7 +3455,7 @@ void constraints::simplifyLocator(Expr *&anchor,
 
     case ConstraintLocator::Member:
     case ConstraintLocator::MemberRefBase:
-      if (auto UDE = dyn_cast<UnresolvedDotExpr>(anchor)) {
+      if (auto UDE = getAsExpr<UnresolvedDotExpr>(anchor)) {
         range = UDE->getNameLoc().getSourceRange();
         anchor = UDE->getBase();
         path = path.slice(1);
@@ -3428,7 +3464,7 @@ void constraints::simplifyLocator(Expr *&anchor,
       break;
 
     case ConstraintLocator::SubscriptMember:
-      if (isa<SubscriptExpr>(anchor)) {
+      if (isExpr<SubscriptExpr>(anchor)) {
         path = path.slice(1);
         continue;
       }
@@ -3436,7 +3472,7 @@ void constraints::simplifyLocator(Expr *&anchor,
 
     case ConstraintLocator::ClosureBody:
     case ConstraintLocator::ClosureResult:
-      if (auto CE = dyn_cast<ClosureExpr>(anchor)) {
+      if (auto CE = getAsExpr<ClosureExpr>(anchor)) {
         if (CE->hasSingleExpressionBody()) {
           anchor = CE->getSingleExpressionBody();
           path = path.slice(1);
@@ -3459,7 +3495,7 @@ void constraints::simplifyLocator(Expr *&anchor,
           path[1].getKind() != ConstraintLocator::ApplyArgument)
         break;
 
-      if (auto *kpe = dyn_cast<KeyPathExpr>(anchor)) {
+      if (auto *kpe = getAsExpr<KeyPathExpr>(anchor)) {
         auto component = kpe->getComponents()[elt.getIndex()];
         auto indexExpr = component.getIndexExpr();
         assert(indexExpr && "Trying to apply a component without an index?");
@@ -3471,16 +3507,22 @@ void constraints::simplifyLocator(Expr *&anchor,
     }
 
     case ConstraintLocator::Condition: {
-      anchor = cast<IfExpr>(anchor)->getCondExpr();
+      anchor = castToExpr<IfExpr>(anchor)->getCondExpr();
       path = path.slice(1);
       continue;
     }
 
     case ConstraintLocator::TernaryBranch: {
       auto branch = path[0].castTo<LocatorPathElt::TernaryBranch>();
-      auto *ifExpr = cast<IfExpr>(anchor);
+      auto *ifExpr = castToExpr<IfExpr>(anchor);
 
       anchor = branch.forThen() ? ifExpr->getThenExpr() : ifExpr->getElseExpr();
+      path = path.slice(1);
+      continue;
+    }
+
+    case ConstraintLocator::KeyPathDynamicMember: {
+      // Key path dynamic member lookup should be completely transparent.
       path = path.slice(1);
       continue;
     }
@@ -3495,13 +3537,13 @@ void constraints::simplifyLocator(Expr *&anchor,
   }
 }
 
-Expr *constraints::simplifyLocatorToAnchor(ConstraintLocator *locator) {
+ASTNode constraints::simplifyLocatorToAnchor(ConstraintLocator *locator) {
   if (!locator)
     return nullptr;
 
-  auto *anchor = locator->getAnchor();
+  auto anchor = locator->getAnchor();
   if (!anchor)
-    return nullptr;
+    return {};
 
   SourceRange range;
   auto path = locator->getPath();
@@ -3512,7 +3554,8 @@ Expr *constraints::simplifyLocatorToAnchor(ConstraintLocator *locator) {
   return path.empty() ? anchor : nullptr;
 }
 
-Expr *constraints::getArgumentExpr(Expr *expr, unsigned index) {
+Expr *constraints::getArgumentExpr(ASTNode node, unsigned index) {
+  auto *expr = castToExpr(node);
   Expr *argExpr = nullptr;
   if (auto *AE = dyn_cast<ApplyExpr>(expr))
     argExpr = AE->getArg();
@@ -3575,8 +3618,7 @@ bool constraints::conformsToKnownProtocol(ConstraintSystem &cs, Type type,
                                           KnownProtocolKind protocol) {
   if (auto *proto =
           TypeChecker::getProtocol(cs.getASTContext(), SourceLoc(), protocol))
-    return (bool)TypeChecker::conformsToProtocol(
-        type, proto, cs.DC, ConformanceCheckFlags::InExpression);
+    return (bool)TypeChecker::conformsToProtocol(type, proto, cs.DC);
   return false;
 }
 
@@ -3590,8 +3632,7 @@ Type constraints::isRawRepresentable(ConstraintSystem &cs, Type type) {
   if (!rawReprType)
     return Type();
 
-  auto conformance = TypeChecker::conformsToProtocol(
-      type, rawReprType, DC, ConformanceCheckFlags::InExpression);
+  auto conformance = TypeChecker::conformsToProtocol(type, rawReprType, DC);
   if (conformance.isInvalid())
     return Type();
 
@@ -3653,19 +3694,19 @@ void ConstraintSystem::generateConstraints(
 
 ConstraintLocator *
 ConstraintSystem::getArgumentInfoLocator(ConstraintLocator *locator) {
-  auto *anchor = locator->getAnchor();
+  auto anchor = locator->getAnchor();
   if (!anchor)
     return nullptr;
 
   // Applies and unresolved member exprs can have callee locators that are
   // dependent on the type of their function, which may not have been resolved
   // yet. Therefore we need to handle them specially.
-  if (auto *apply = dyn_cast<ApplyExpr>(anchor)) {
+  if (auto *apply = getAsExpr<ApplyExpr>(anchor)) {
     auto *fnExpr = getArgumentLabelTargetExpr(apply->getFn());
     return getConstraintLocator(fnExpr);
   }
 
-  if (auto *UME = dyn_cast<UnresolvedMemberExpr>(anchor))
+  if (auto *UME = getAsExpr<UnresolvedMemberExpr>(anchor))
     return getConstraintLocator(UME);
 
   auto path = locator->getPath();
@@ -3753,7 +3794,7 @@ Type Solution::resolveInterfaceType(Type type) const {
 
 Optional<FunctionArgApplyInfo>
 Solution::getFunctionArgApplyInfo(ConstraintLocator *locator) const {
-  auto *anchor = locator->getAnchor();
+  auto anchor = locator->getAnchor();
   auto path = locator->getPath();
 
   // Look for the apply-arg-to-param element in the locator's path. We may
@@ -3774,7 +3815,7 @@ Solution::getFunctionArgApplyInfo(ConstraintLocator *locator) const {
   auto argPath = path.drop_back(iter - path.rbegin());
   auto *argLocator = getConstraintLocator(anchor, argPath);
 
-  auto *argExpr = simplifyLocatorToAnchor(argLocator);
+  auto *argExpr = castToExpr(simplifyLocatorToAnchor(argLocator));
 
   // If we were unable to simplify down to the argument expression, we don't
   // know what this is.
@@ -3792,7 +3833,7 @@ Solution::getFunctionArgApplyInfo(ConstraintLocator *locator) const {
   } else {
     // If we didn't resolve an overload for the callee, we should be dealing
     // with a call of an arbitrary function expr.
-    auto *call = cast<CallExpr>(anchor);
+    auto *call = castToExpr<CallExpr>(anchor);
     assert(!shouldHaveDirectCalleeOverload(call) &&
              "Should we have resolved a callee for this?");
     rawFnType = getType(call->getFn());
@@ -3879,7 +3920,7 @@ Optional<Identifier> constraints::getOperatorName(Expr *expr) {
   }
 
   if (auto *FD = dyn_cast_or_null<AbstractFunctionDecl>(choice))
-    return FD->getBaseName().getIdentifier();
+    return FD->getBaseIdentifier();
 
   return None;
 }
@@ -3893,7 +3934,7 @@ bool constraints::isOperatorArgument(ConstraintLocator *locator,
   if (!locator->findLast<LocatorPathElt::ApplyArgToParam>())
     return false;
 
-  if (auto *AE = dyn_cast_or_null<ApplyExpr>(locator->getAnchor())) {
+  if (auto *AE = getAsExpr<ApplyExpr>(locator->getAnchor())) {
     if (isa<PrefixUnaryExpr>(AE) || isa<BinaryExpr>(AE) ||
         isa<PostfixUnaryExpr>(AE))
       return expectedOperator.empty() ||
@@ -3905,7 +3946,7 @@ bool constraints::isOperatorArgument(ConstraintLocator *locator,
 
 bool constraints::isArgumentOfPatternMatchingOperator(
     ConstraintLocator *locator) {
-  auto *binaryOp = dyn_cast_or_null<BinaryExpr>(locator->getAnchor());
+  auto *binaryOp = getAsExpr<BinaryExpr>(locator->getAnchor());
   if (!(binaryOp && binaryOp->isImplicit()))
     return false;
   return isPatternMatchingOperator(binaryOp->getFn());
@@ -3946,7 +3987,8 @@ ConstraintSystem::isConversionEphemeral(ConversionRestrictionKind conversion,
 
     SourceRange range;
     auto *argLoc = simplifyLocator(*this, getConstraintLocator(locator), range);
-    auto *subExpr = argLoc->getAnchor()->getSemanticsProvidingExpr();
+    auto *subExpr =
+        castToExpr(argLoc->getAnchor())->getSemanticsProvidingExpr();
 
     // Look through an InOutExpr if we have one. This is usually the case, but
     // might not be if e.g we're applying an 'add missing &' fix.
@@ -4057,6 +4099,7 @@ ConstraintSystem::isConversionEphemeral(ConversionRestrictionKind conversion,
     // parameter.
     return ConversionEphemeralness::NonEphemeral;
   }
+  llvm_unreachable("invalid conversion restriction kind");
 }
 
 Expr *ConstraintSystem::buildAutoClosureExpr(Expr *expr,
@@ -4112,11 +4155,13 @@ Expr *ConstraintSystem::buildTypeErasedExpr(Expr *expr, DeclContext *dc,
   if (protocols.size() != 1)
     return expr;
 
-  auto *attr = protocols.front()->getAttrs().getAttribute<TypeEraserAttr>();
+  auto *PD = protocols.front();
+  auto *attr = PD->getAttrs().getAttribute<TypeEraserAttr>();
   if (!attr)
     return expr;
 
-  auto typeEraser = attr->getTypeEraserLoc().getType();
+  auto typeEraser = attr->getResolvedType(PD);
+  assert(typeEraser && "Failed to resolve eraser type!");
   auto &ctx = dc->getASTContext();
   return CallExpr::createImplicit(ctx,
                                   TypeExpr::createImplicit(typeEraser, ctx),
@@ -4166,10 +4211,11 @@ SolutionApplicationTarget::SolutionApplicationTarget(
   expression.convertType = convertType;
   expression.pattern = nullptr;
   expression.wrappedVar = nullptr;
+  expression.innermostWrappedValueInit = nullptr;
   expression.isDiscarded = isDiscarded;
   expression.bindPatternVarsOneWay = false;
-  expression.patternBinding = nullptr;
-  expression.patternBindingIndex = 0;
+  expression.initialization.patternBinding = nullptr;
+  expression.initialization.patternBindingIndex = 0;
 }
 
 void SolutionApplicationTarget::maybeApplyPropertyWrapper() {
@@ -4190,18 +4236,29 @@ void SolutionApplicationTarget::maybeApplyPropertyWrapper() {
   Expr *backingInitializer;
   if (Expr *initializer = expression.expression) {
     // Form init(wrappedValue:) call(s).
-    Expr *wrappedInitializer =
-        buildPropertyWrapperInitialValueCall(
-            singleVar, Type(), initializer, /*ignoreAttributeArgs=*/false);
+    Expr *wrappedInitializer = buildPropertyWrapperWrappedValueCall(
+        singleVar, Type(), initializer, /*ignoreAttributeArgs=*/false,
+        [&](ApplyExpr *innermostInit) {
+          expression.innermostWrappedValueInit = innermostInit;
+        });
     if (!wrappedInitializer)
       return;
 
     backingInitializer = wrappedInitializer;
-  } else if (auto outermostArg = outermostWrapperAttr->getArg()) {
+  } else {
     Type outermostWrapperType =
         singleVar->getAttachedPropertyWrapperType(0);
     if (!outermostWrapperType)
       return;
+
+    // Retrieve the outermost wrapper argument. If there isn't one, we're
+    // performing default initialization.
+    auto outermostArg = outermostWrapperAttr->getArg();
+    if (!outermostArg) {
+      SourceLoc fakeParenLoc = outermostWrapperAttr->getRange().End;
+      outermostArg = TupleExpr::createEmpty(
+          ctx, fakeParenLoc, fakeParenLoc, /*Implicit=*/true);
+    }
 
     auto typeExpr = TypeExpr::createImplicitHack(
         outermostWrapperAttr->getTypeLoc().getLoc(),
@@ -4212,8 +4269,6 @@ void SolutionApplicationTarget::maybeApplyPropertyWrapper() {
         outermostWrapperAttr->getArgumentLabelLocs(),
         /*hasTrailingClosure=*/false,
         /*implicit=*/false);
-  } else {
-    llvm_unreachable("No initializer anywhere?");
   }
   wrapperAttrs[0]->setSemanticInit(backingInitializer);
 
@@ -4221,6 +4276,7 @@ void SolutionApplicationTarget::maybeApplyPropertyWrapper() {
   // the initializer type later.
   expression.wrappedVar = singleVar;
   expression.expression = backingInitializer;
+  expression.convertType = outermostWrapperAttr->getTypeLoc();
 }
 
 SolutionApplicationTarget SolutionApplicationTarget::forInitialization(
@@ -4228,7 +4284,7 @@ SolutionApplicationTarget SolutionApplicationTarget::forInitialization(
     bool bindPatternVarsOneWay) {
   // Determine the contextual type for the initialization.
   TypeLoc contextualType;
-  if (!isa<OptionalSomePattern>(pattern) &&
+  if (!(isa<OptionalSomePattern>(pattern) && !pattern->isImplicit()) &&
       patternType && !patternType->isHole()) {
     contextualType = TypeLoc::withoutLoc(patternType);
 
@@ -4259,18 +4315,35 @@ SolutionApplicationTarget SolutionApplicationTarget::forInitialization(
     auto result = forInitialization(
         initializer, dc, patternType,
         patternBinding->getPattern(patternBindingIndex), bindPatternVarsOneWay);
-    result.expression.patternBinding = patternBinding;
-    result.expression.patternBindingIndex = patternBindingIndex;
+    result.expression.initialization.patternBinding = patternBinding;
+    result.expression.initialization.patternBindingIndex = patternBindingIndex;
     return result;
 }
 
+SolutionApplicationTarget SolutionApplicationTarget::forForEachStmt(
+    ForEachStmt *stmt, ProtocolDecl *sequenceProto, DeclContext *dc,
+    bool bindPatternVarsOneWay) {
+  SolutionApplicationTarget target(
+      stmt->getSequence(), dc, CTP_ForEachStmt,
+      sequenceProto->getDeclaredType(), /*isDiscarded=*/false);
+  target.expression.pattern = stmt->getPattern();
+  target.expression.bindPatternVarsOneWay =
+    bindPatternVarsOneWay || (stmt->getWhere() != nullptr);
+  target.expression.forEachStmt.stmt = stmt;
+  target.expression.forEachStmt.whereExpr = stmt->getWhere();
+  return target;
+}
+
 ContextualPattern
-SolutionApplicationTarget::getInitializationContextualPattern() const {
+SolutionApplicationTarget::getContextualPattern() const {
   assert(kind == Kind::expression);
-  assert(expression.contextualPurpose == CTP_Initialization);
-  if (expression.patternBinding) {
+  assert(expression.contextualPurpose == CTP_Initialization ||
+         expression.contextualPurpose == CTP_ForEachStmt);
+  if (expression.contextualPurpose == CTP_Initialization &&
+      expression.initialization.patternBinding) {
     return ContextualPattern::forPatternBindingDecl(
-        expression.patternBinding, expression.patternBindingIndex);
+        expression.initialization.patternBinding,
+        expression.initialization.patternBindingIndex);
   }
 
   return ContextualPattern::forRawPattern(expression.pattern, expression.dc);
@@ -4331,6 +4404,7 @@ bool SolutionApplicationTarget::contextualTypeIsOnlyAHint() const {
   case CTP_CannotFail:
     return false;
   }
+  llvm_unreachable("invalid contextual type");
 }
 
 /// Given a specific expression and the remnants of the failed constraint
@@ -4378,9 +4452,6 @@ bool ConstraintSystem::isDeclUnavailable(const Decl *D,
                                          ConstraintLocator *locator) const {
   auto &ctx = getASTContext();
 
-  if (ctx.LangOpts.DisableAvailabilityChecking)
-    return false;
-
   // First check whether this declaration is universally unavailable.
   if (D->getAttrs().isUnavailable(ctx))
     return true;
@@ -4388,11 +4459,46 @@ bool ConstraintSystem::isDeclUnavailable(const Decl *D,
   SourceLoc loc;
 
   if (locator) {
-    if (auto *anchor = locator->getAnchor())
-      loc = anchor->getLoc();
+    if (auto anchor = locator->getAnchor())
+      loc = getLoc(anchor);
   }
 
   // If not, let's check contextual unavailability.
-  AvailabilityContext result = AvailabilityContext::alwaysAvailable();
-  return !TypeChecker::isDeclAvailable(D, loc, DC, result);
+  auto result = TypeChecker::checkDeclarationAvailability(D, loc, DC);
+  return result.hasValue();
+}
+
+/// If we aren't certain that we've emitted a diagnostic, emit a fallback
+/// diagnostic.
+void ConstraintSystem::maybeProduceFallbackDiagnostic(
+    SolutionApplicationTarget target) const {
+  if (Options.contains(ConstraintSystemFlags::SuppressDiagnostics))
+    return;
+
+  // Before producing fatal error here, let's check if there are any "error"
+  // diagnostics already emitted or waiting to be emitted. Because they are
+  // a better indication of the problem.
+  ASTContext &ctx = getASTContext();
+  if (ctx.Diags.hadAnyError() || ctx.hasDelayedConformanceErrors())
+    return;
+
+  ctx.Diags.diagnose(target.getLoc(), diag::failed_to_produce_diagnostic);
+}
+
+SourceLoc constraints::getLoc(ASTNode anchor) {
+  if (auto *E = anchor.dyn_cast<Expr *>()) {
+    return E->getLoc();
+  } else if (auto *T = anchor.dyn_cast<TypeLoc *>()) {
+    return T->getLoc();
+  } else if (auto *V = anchor.dyn_cast<Decl *>()) {
+    if (auto VD = dyn_cast<VarDecl>(V))
+      return VD->getNameLoc();
+    return anchor.getStartLoc();
+  } else {
+    return anchor.get<Pattern *>()->getLoc();
+  }
+}
+
+SourceRange constraints::getSourceRange(ASTNode anchor) {
+  return anchor.getSourceRange();
 }

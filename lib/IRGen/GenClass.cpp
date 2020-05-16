@@ -33,7 +33,6 @@
 #include "swift/SIL/SILType.h"
 #include "swift/SIL/SILVTableVisitor.h"
 #include "llvm/ADT/SmallString.h"
-#include "llvm/IR/CallSite.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -273,6 +272,13 @@ namespace {
           // context.
           if (superclassType.hasArchetype())
             Options |= ClassMetadataFlags::ClassHasGenericLayout;
+
+          // Since we're not going to visit the superclass, make sure that we still
+          // set ClassHasObjCAncestry correctly.
+          if (superclassType.getASTType()->getReferenceCounting()
+                == ReferenceCounting::ObjC) {
+            Options |= ClassMetadataFlags::ClassHasObjCAncestry;
+          }
         } else {
           // Otherwise, we are allowed to have total knowledge of the superclass
           // fields, so walk them to compute the layout.
@@ -1113,8 +1119,7 @@ namespace {
     void visitConformances(DeclContext *dc) {
       llvm::SmallSetVector<ProtocolDecl *, 2> protocols;
       for (auto conformance : dc->getLocalConformances(
-                                ConformanceLookupKind::OnlyExplicit,
-                                nullptr)) {
+                                ConformanceLookupKind::OnlyExplicit)) {
         ProtocolDecl *proto = conformance->getProtocol();
         getObjCProtocols(proto, protocols);
       }
@@ -1521,33 +1526,27 @@ namespace {
     }
 
     void buildMethod(ConstantArrayBuilder &descriptors,
-                     MethodDescriptor descriptor,
-                     llvm::StringSet<> &uniqueSelectors) {
+                     MethodDescriptor descriptor) {
       switch (descriptor.getKind()) {
       case MethodDescriptor::Kind::Method:
-        return buildMethod(descriptors, descriptor.getMethod(),
-                           uniqueSelectors);
+        return buildMethod(descriptors, descriptor.getMethod());
       case MethodDescriptor::Kind::IVarInitializer:
         emitObjCIVarInitDestroyDescriptor(IGM, descriptors, getClass(),
-                                          descriptor.getImpl(), false,
-                                          uniqueSelectors);
+                                          descriptor.getImpl(), false);
         return;
       case MethodDescriptor::Kind::IVarDestroyer:
         emitObjCIVarInitDestroyDescriptor(IGM, descriptors, getClass(),
-                                          descriptor.getImpl(), true,
-                                          uniqueSelectors);
+                                          descriptor.getImpl(), true);
         return;
       }
       llvm_unreachable("bad method descriptor kind");
     }
 
     void buildMethod(ConstantArrayBuilder &descriptors,
-                     AbstractFunctionDecl *method,
-                     llvm::StringSet<> &uniqueSelectors) {
+                     AbstractFunctionDecl *method) {
       auto accessor = dyn_cast<AccessorDecl>(method);
       if (!accessor)
-        return emitObjCMethodDescriptor(IGM, descriptors, method,
-                                        uniqueSelectors);
+        return emitObjCMethodDescriptor(IGM, descriptors, method);
 
       switch (accessor->getAccessorKind()) {
       case AccessorKind::Get:
@@ -1616,9 +1615,7 @@ namespace {
         namePrefix = "_PROTOCOL_INSTANCE_METHODS_OPT_";
         break;
       }
-      llvm::StringSet<> uniqueSelectors;
-      llvm::Constant *methodListPtr =
-          buildMethodList(methods, namePrefix, uniqueSelectors);
+      llvm::Constant *methodListPtr = buildMethodList(methods, namePrefix);
       builder.add(methodListPtr);
     }
 
@@ -1661,12 +1658,11 @@ namespace {
     ///
     /// This method does not return a value of a predictable type.
     llvm::Constant *buildMethodList(ArrayRef<MethodDescriptor> methods,
-                                    StringRef name,
-                                    llvm::StringSet<> &uniqueSelectors) {
+                                    StringRef name) {
       return buildOptionalList(methods, 3 * IGM.getPointerSize(), name,
                                [&](ConstantArrayBuilder &descriptors,
                                    MethodDescriptor descriptor) {
-        buildMethod(descriptors, descriptor, uniqueSelectors);
+        buildMethod(descriptors, descriptor);
       });
     }
 
@@ -2102,41 +2098,44 @@ static llvm::Function *emitObjCMetadataUpdateFunction(IRGenModule &IGM,
 /// We emit Objective-C class stubs for non-generic classes with resilient
 /// ancestry. This lets us attach categories to the class even though it
 /// does not have statically-emitted metadata.
-bool irgen::hasObjCResilientClassStub(IRGenModule &IGM, ClassDecl *D) {
-  assert(IGM.getClassMetadataStrategy(D) == ClassMetadataStrategy::Resilient);
-  return IGM.ObjCInterop && !D->isGenericContext();
+bool IRGenModule::hasObjCResilientClassStub(ClassDecl *D) {
+  assert(getClassMetadataStrategy(D) == ClassMetadataStrategy::Resilient);
+  return ObjCInterop && !D->isGenericContext();
 }
 
-void irgen::emitObjCResilientClassStub(IRGenModule &IGM, ClassDecl *D) {
-  assert(hasObjCResilientClassStub(IGM, D));
+void IRGenModule::emitObjCResilientClassStub(ClassDecl *D) {
+  assert(hasObjCResilientClassStub(D));
 
-  llvm::Constant *fields[] = {
-    llvm::ConstantInt::get(IGM.SizeTy, 0), // reserved
-    llvm::ConstantInt::get(IGM.SizeTy, 1), // isa
-    IGM.getAddrOfObjCMetadataUpdateFunction(D, NotForDefinition)
-  };
-  auto init = llvm::ConstantStruct::get(IGM.ObjCFullResilientClassStubTy,
-                                        makeArrayRef(fields));
+  ConstantInitBuilder builder(*this);
+  auto fields = builder.beginStruct(ObjCFullResilientClassStubTy);
+  fields.addInt(SizeTy, 0); // reserved
+  fields.addInt(SizeTy, 1); // isa
+  auto *impl = getAddrOfObjCMetadataUpdateFunction(D, NotForDefinition);
+  const auto &schema =
+      getOptions().PointerAuth.ResilientClassStubInitCallbacks;
+  fields.addSignedPointer(impl, schema, PointerAuthEntity()); // callback
+
+  auto init = fields.finishAndCreateFuture();
 
   // Define the full stub. This is a private symbol.
+  LinkEntity entity = LinkEntity::forObjCResilientClassStub(
+      D, TypeMetadataAddress::FullMetadata);
   auto fullObjCStub = cast<llvm::GlobalVariable>(
-      IGM.getAddrOfObjCResilientClassStub(D, ForDefinition,
-                                          TypeMetadataAddress::FullMetadata));
-  fullObjCStub->setInitializer(init);
+      getAddrOfLLVMVariable(entity, init, DebugTypeInfo()));
 
   // Emit the metadata update function referenced above.
-  emitObjCMetadataUpdateFunction(IGM, D);
+  emitObjCMetadataUpdateFunction(*this, D);
 
   // Apply the offset.
-  auto *objcStub = llvm::ConstantExpr::getBitCast(fullObjCStub, IGM.Int8PtrTy);
+  auto *objcStub = llvm::ConstantExpr::getBitCast(fullObjCStub, Int8PtrTy);
   objcStub = llvm::ConstantExpr::getInBoundsGetElementPtr(
-      IGM.Int8Ty, objcStub, IGM.getSize(IGM.getPointerSize()));
+      Int8Ty, objcStub, getSize(getPointerSize()));
   objcStub = llvm::ConstantExpr::getPointerCast(objcStub,
-      IGM.ObjCResilientClassStubTy->getPointerTo());
+      ObjCResilientClassStubTy->getPointerTo());
 
-  auto entity = LinkEntity::forObjCResilientClassStub(
+  entity = LinkEntity::forObjCResilientClassStub(
       D, TypeMetadataAddress::AddressPoint);
-  IGM.defineAlias(entity, objcStub);
+  defineAlias(entity, objcStub);
 }
 
 /// Emit the private data (RO-data) associated with a class.

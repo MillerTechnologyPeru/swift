@@ -490,12 +490,13 @@ public:
   }
   
   SILFunction &getFunction() { return F; }
+  const SILFunction &getFunction() const { return F; }
   SILModule &getModule() { return F.getModule(); }
   SILGenBuilder &getBuilder() { return B; }
   const SILOptions &getOptions() { return getModule().getOptions(); }
 
   // Returns the type expansion context for types in this function.
-  TypeExpansionContext getTypeExpansionContext() {
+  TypeExpansionContext getTypeExpansionContext() const {
     return TypeExpansionContext(getFunction());
   }
 
@@ -531,17 +532,19 @@ public:
   }
 
   SILType getSILInterfaceType(SILParameterInfo param) const {
-    return silConv.getSILType(param, CanSILFunctionType());
+    return silConv.getSILType(param, CanSILFunctionType(),
+                              getTypeExpansionContext());
   }
   SILType getSILInterfaceType(SILResultInfo result) const {
-    return silConv.getSILType(result, CanSILFunctionType());
+    return silConv.getSILType(result, CanSILFunctionType(),
+                              getTypeExpansionContext());
   }
 
   SILType getSILType(SILParameterInfo param, CanSILFunctionType fnTy) const {
-    return silConv.getSILType(param, fnTy);
+    return silConv.getSILType(param, fnTy, getTypeExpansionContext());
   }
   SILType getSILType(SILResultInfo result, CanSILFunctionType fnTy) const {
-    return silConv.getSILType(result, fnTy);
+    return silConv.getSILType(result, fnTy, getTypeExpansionContext());
   }
 
   SILType getSILTypeInContext(SILResultInfo result, CanSILFunctionType fnTy) {
@@ -607,9 +610,9 @@ public:
   void emitDestroyingDestructor(DestructorDecl *dd);
 
   /// Generates code for an artificial top-level function that starts an
-  /// application based on a main class.
-  void emitArtificialTopLevel(ClassDecl *mainClass);
-  
+  /// application based on a main type and optionally a main type.
+  void emitArtificialTopLevel(Decl *mainDecl);
+
   /// Generates code for a class deallocating destructor. This
   /// calls the destroying destructor and then deallocates 'self'.
   void emitDeallocatingDestructor(DestructorDecl *dd);
@@ -1088,7 +1091,7 @@ public:
   void emitBreakOutOf(SILLocation loc, Stmt *S);
 
   void emitCatchDispatch(DoCatchStmt *S, ManagedValue exn,
-                         ArrayRef<CatchStmt*> clauses,
+                         ArrayRef<CaseStmt *> clauses,
                          JumpDest catchFallthroughDest);
 
   /// Emit code for the throw expr. If \p emitWillThrow is set then emit a
@@ -1856,6 +1859,23 @@ public:
   createWithoutActuallyEscapingClosure(SILLocation loc,
                                        ManagedValue noEscapingFunctionValue,
                                        SILType escapingFnTy);
+
+  //===--------------------------------------------------------------------===//
+  // Differentiation thunks
+  //===--------------------------------------------------------------------===//
+
+  /// Get or create a thunk for reabstracting and self-reordering
+  /// differentials/pullbacks returned by user-defined JVP/VJP functions, and
+  /// apply it to the given differential/pullback.
+  ///
+  /// If `reorderSelf` is true, reorder self so that it appears as:
+  /// - The last parameter, for differentials.
+  /// - The last result, for pullbacks.
+  ManagedValue getThunkedAutoDiffLinearMap(ManagedValue linearMap,
+                                           AutoDiffLinearMapKind linearMapKind,
+                                           CanSILFunctionType fromType,
+                                           CanSILFunctionType toType,
+                                           bool reorderSelf);
 
   //===--------------------------------------------------------------------===//
   // Declarations

@@ -182,7 +182,7 @@ bool swift::removeOverriddenDecls(SmallVectorImpl<ValueDecl*> &decls) {
       // C.init overrides B.init overrides A.init, but only C.init and
       // A.init are in the chain. Make sure we still remove A.init from the
       // set in this case.
-      if (decl->getFullName().getBaseName() == DeclBaseName::createConstructor()) {
+      if (decl->getBaseName() == DeclBaseName::createConstructor()) {
         /// FIXME: Avoid the possibility of an infinite loop by fixing the root
         ///        cause instead (incomplete circularity detection).
         assert(decl != overrides && "Circular class inheritance?");
@@ -444,7 +444,7 @@ static void recordShadowedDeclsAfterSignatureMatch(
           if (owningStruct1 == owningStruct2 &&
               owningStruct1->getName().is("Data") &&
               isa<FuncDecl>(firstDecl) && isa<FuncDecl>(secondDecl) &&
-              firstDecl->getFullName() == secondDecl->getFullName() &&
+              firstDecl->getName() == secondDecl->getName() &&
               firstDecl->getBaseName().userFacingName() == "withUnsafeBytes") {
             // If the second module is the Foundation module and the first
             // is the NIOFoundationCompat module, the second is shadowed by the
@@ -602,7 +602,7 @@ bool swift::removeShadowedDecls(SmallVectorImpl<ValueDecl*> &decls,
   bool anyCollisions = false;
   for (auto decl : decls) {
     // Record this declaration based on its full name.
-    auto &knownDecls = collidingDeclGroups[decl->getFullName()];
+    auto &knownDecls = collidingDeclGroups[decl->getName()];
     if (!knownDecls.empty())
       anyCollisions = true;
 
@@ -616,7 +616,7 @@ bool swift::removeShadowedDecls(SmallVectorImpl<ValueDecl*> &decls,
   // Walk through the declarations again, marking any declarations that shadow.
   llvm::SmallPtrSet<ValueDecl *, 4> shadowed;
   for (auto decl : decls) {
-    auto known = collidingDeclGroups.find(decl->getFullName());
+    auto known = collidingDeclGroups.find(decl->getName());
     if (known == collidingDeclGroups.end()) {
       // We already handled this group.
       continue;
@@ -706,17 +706,6 @@ void namelookup::filterForDiscriminator(SmallVectorImpl<Result> &results,
 
 template void namelookup::filterForDiscriminator<LookupResultEntry>(
     SmallVectorImpl<LookupResultEntry> &results, DebuggerClient *debugClient);
-
-void namelookup::recordLookupOfTopLevelName(DeclContext *topLevelContext,
-                                            DeclName name, bool isCascading) {
-  auto SF = dyn_cast<SourceFile>(topLevelContext);
-  if (!SF)
-    return;
-  auto *nameTracker = SF->getReferencedNameTracker();
-  if (!nameTracker)
-    return;
-  nameTracker->addTopLevelName(name.getBaseName(), isCascading);
-}
 
 namespace {
   /// Whether we're looking up outer results or not.
@@ -1026,7 +1015,7 @@ void MemberLookupTable::addMember(Decl *member) {
 
   // Add this declaration to the lookup set under its compound name and simple
   // name.
-  vd->getFullName().addToLookupTable(Lookup, vd);
+  vd->getName().addToLookupTable(Lookup, vd);
 
   // And if given a synonym, under that name too.
   if (A)
@@ -1224,7 +1213,7 @@ maybeFilterOutAttrImplements(TinyPtrVector<ValueDecl *> decls,
     // Filter-out any decl that doesn't have the name we're looking for
     // (asserting as a consistency-check that such entries all have
     // @_implements attrs for the name!)
-    if (V->getFullName().matchesRef(name)) {
+    if (V->getName().matchesRef(name)) {
       result.push_back(V);
     } else {
       auto A = V->getAttrs().getAttribute<ImplementsAttr>();
@@ -1242,7 +1231,7 @@ NominalTypeDecl::lookupDirect(DeclName name,
                            DirectLookupRequest({this, name, flags}), {});
 }
 
-llvm::Expected<TinyPtrVector<ValueDecl *>>
+TinyPtrVector<ValueDecl *>
 DirectLookupRequest::evaluate(Evaluator &evaluator,
                               DirectLookupDescriptor desc) const {
   const auto &name = desc.Name;
@@ -1365,51 +1354,6 @@ void ClassDecl::recordObjCMethod(AbstractFunctionDecl *method,
   }
 
   vec.push_back(method);
-}
-
-/// Configure name lookup for the given declaration context and options.
-///
-/// This utility is used by qualified name lookup.
-static void configureLookup(const DeclContext *dc,
-                            NLOptions options,
-                            ReferencedNameTracker *&tracker,
-                            bool &isLookupCascading) {
-  // Find the dependency tracker we'll need for this lookup.
-  tracker = nullptr;
-  if (auto containingSourceFile =
-          dyn_cast<SourceFile>(dc->getModuleScopeContext())) {
-    tracker = containingSourceFile->getReferencedNameTracker();
-  }
-
-  auto checkLookupCascading = [dc, options]() -> Optional<bool> {
-    switch (static_cast<unsigned>(options & NL_KnownDependencyMask)) {
-    case 0:
-      return dc->isCascadingContextForLookup(
-               /*functionsAreNonCascading=*/false);
-    case NL_KnownNonCascadingDependency:
-      return false;
-    case NL_KnownCascadingDependency:
-      return true;
-    case NL_KnownNoDependency:
-      return None;
-    default:
-      // FIXME: Use llvm::CountPopulation_64 when that's declared constexpr.
-#if defined(__clang__) || defined(__GNUC__)
-      static_assert(__builtin_popcountll(NL_KnownDependencyMask) == 2,
-                    "mask should only include four values");
-#endif
-      llvm_unreachable("mask only includes four values");
-    }
-  };
-
-  // Determine whether a lookup here will cascade.
-  isLookupCascading = false;
-  if (tracker) {
-    if (auto maybeLookupCascade = checkLookupCascading())
-      isLookupCascading = maybeLookupCascade.getValue();
-    else
-      tracker = nullptr;
-  }
 }
 
 /// Determine whether the given declaration is an acceptable lookup
@@ -1570,17 +1514,12 @@ bool DeclContext::lookupQualified(ArrayRef<NominalTypeDecl *> typeDecls,
   return !decls.empty();
 }
 
-llvm::Expected<QualifiedLookupResult>
+QualifiedLookupResult
 QualifiedLookupRequest::evaluate(Evaluator &eval, const DeclContext *DC,
                                  SmallVector<NominalTypeDecl *, 4> typeDecls,
                                  DeclNameRef member, NLOptions options) const {
   using namespace namelookup;
   QualifiedLookupResult decls;
-
-  // Configure lookup and dig out the tracker.
-  ReferencedNameTracker *tracker = nullptr;
-  bool isLookupCascading;
-  configureLookup(DC, options, tracker, isLookupCascading);
 
   // Tracking for the nominal types we'll visit.
   SmallVector<NominalTypeDecl *, 4> stack;
@@ -1609,14 +1548,10 @@ QualifiedLookupRequest::evaluate(Evaluator &eval, const DeclContext *DC,
 
   // Visit all of the nominal types we know about, discovering any others
   // we need along the way.
-  auto &ctx = DC->getASTContext();
   bool wantProtocolMembers = (options & NL_ProtocolMembers);
   while (!stack.empty()) {
     auto current = stack.back();
     stack.pop_back();
-
-    if (tracker)
-      tracker->addUsedMember({current, member.getBaseName()},isLookupCascading);
 
     // Make sure we've resolved property wrappers, if we need them.
     installPropertyWrapperMembersIfNeeded(current, member);
@@ -1710,27 +1645,18 @@ bool DeclContext::lookupQualified(ModuleDecl *module, DeclNameRef member,
   return !decls.empty();
 }
 
-llvm::Expected<QualifiedLookupResult>
+QualifiedLookupResult
 ModuleQualifiedLookupRequest::evaluate(Evaluator &eval, const DeclContext *DC,
                                        ModuleDecl *module, DeclNameRef member,
                                        NLOptions options) const {
   using namespace namelookup;
   QualifiedLookupResult decls;
 
-  // Configure lookup and dig out the tracker.
-  ReferencedNameTracker *tracker = nullptr;
-  bool isLookupCascading;
-  configureLookup(DC, options, tracker, isLookupCascading);
-
   auto kind = (options & NL_OnlyTypes
                ? ResolutionKind::TypesOnly
                : ResolutionKind::Overloadable);
   auto topLevelScope = DC->getModuleScopeContext();
   if (module == topLevelScope->getParentModule()) {
-    if (tracker) {
-      recordLookupOfTopLevelName(topLevelScope, member.getFullName(),
-                                 isLookupCascading);
-    }
     lookupInModule(module, member.getFullName(), decls,
                    NLKind::QualifiedLookup, kind, topLevelScope);
   } else {
@@ -1763,20 +1689,11 @@ ModuleQualifiedLookupRequest::evaluate(Evaluator &eval, const DeclContext *DC,
   return decls;
 }
 
-llvm::Expected<QualifiedLookupResult>
+QualifiedLookupResult
 AnyObjectLookupRequest::evaluate(Evaluator &evaluator, const DeclContext *dc,
                                  DeclNameRef member, NLOptions options) const {
   using namespace namelookup;
   QualifiedLookupResult decls;
-
-  // Configure lookup and dig out the tracker.
-  ReferencedNameTracker *tracker = nullptr;
-  bool isLookupCascading;
-  configureLookup(dc, options, tracker, isLookupCascading);
-
-  // Record this lookup.
-  if (tracker)
-    tracker->addDynamicLookupName(member.getBaseName(), isLookupCascading);
 
   // Type-only lookup won't find anything on AnyObject.
   if (options & NL_OnlyTypes)
@@ -1785,8 +1702,8 @@ AnyObjectLookupRequest::evaluate(Evaluator &evaluator, const DeclContext *dc,
   // Collect all of the visible declarations.
   SmallVector<ValueDecl *, 4> allDecls;
   for (auto import : namelookup::getAllImports(dc)) {
-    import.second->lookupClassMember(import.first, member.getFullName(),
-                                     allDecls);
+    import.importedModule->lookupClassMember(import.accessPath,
+                                             member.getFullName(), allDecls);
   }
 
   // For each declaration whose context is not something we've
@@ -1828,7 +1745,7 @@ void DeclContext::lookupAllObjCMethods(
        SmallVectorImpl<AbstractFunctionDecl *> &results) const {
   // Collect all of the methods with this selector.
   for (auto import : namelookup::getAllImports(this)) {
-    import.second->lookupObjCMethods(selector, results);
+    import.importedModule->lookupObjCMethods(selector, results);
   }
 
   // Filter out duplicates.
@@ -2189,7 +2106,7 @@ DirectlyReferencedTypeDecls UnderlyingTypeDeclsReferencedRequest::evaluate(
 }
 
 /// Evaluate a superclass declaration request.
-llvm::Expected<ClassDecl *>
+ClassDecl *
 SuperclassDeclRequest::evaluate(Evaluator &evaluator,
                                 NominalTypeDecl *subject) const {
   auto &Ctx = subject->getASTContext();
@@ -2236,7 +2153,24 @@ SuperclassDeclRequest::evaluate(Evaluator &evaluator,
   return nullptr;
 }
 
-llvm::Expected<NominalTypeDecl *>
+ArrayRef<ProtocolDecl *>
+InheritedProtocolsRequest::evaluate(Evaluator &evaluator,
+                                    ProtocolDecl *PD) const {
+  llvm::SmallVector<ProtocolDecl *, 2> result;
+  SmallPtrSet<const ProtocolDecl *, 2> known;
+  known.insert(PD);
+  bool anyObject = false;
+  for (const auto &found : getDirectlyInheritedNominalTypeDecls(PD, anyObject)) {
+    if (auto proto = dyn_cast<ProtocolDecl>(found.Item)) {
+      if (known.insert(proto).second)
+        result.push_back(proto);
+    }
+  }
+
+  return PD->getASTContext().AllocateCopy(result);
+}
+
+NominalTypeDecl *
 ExtendedNominalRequest::evaluate(Evaluator &evaluator,
                                  ExtensionDecl *ext) const {
   auto typeRepr = ext->getExtendedTypeRepr();
@@ -2273,7 +2207,7 @@ static bool declsAreAssociatedTypes(ArrayRef<TypeDecl *> decls) {
   return true;
 }
 
-llvm::Expected<NominalTypeDecl *>
+NominalTypeDecl *
 CustomAttrNominalRequest::evaluate(Evaluator &evaluator,
                                    CustomAttr *attr, DeclContext *dc) const {
   // Find the types referenced by the custom attribute.
@@ -2322,7 +2256,7 @@ CustomAttrNominalRequest::evaluate(Evaluator &evaluator,
                            moduleName.str().str() + ".");
             ctx.Diags.diagnose(assocType, diag::kind_declname_declared_here,
                                assocType->getDescriptiveKind(),
-                               assocType->getFullName());
+                               assocType->getName());
 
             ComponentIdentTypeRepr *components[2] = {
               new (ctx) SimpleIdentTypeRepr(identTypeRepr->getNameLoc(),
@@ -2605,21 +2539,9 @@ void FindLocalVal::visitDoCatchStmt(DoCatchStmt *S) {
   if (!isReferencePointInRange(S->getSourceRange()))
     return;
   visit(S->getBody());
-  visitCatchClauses(S->getCatches());
-}
-void FindLocalVal::visitCatchClauses(ArrayRef<CatchStmt*> clauses) {
-  // TODO: some sort of binary search?
-  for (auto clause : clauses) {
-    visitCatchStmt(clause);
+  for (CaseStmt *C : S->getCatches()) {
+    visit(C);
   }
-}
-void FindLocalVal::visitCatchStmt(CatchStmt *S) {
-  if (!isReferencePointInRange(S->getSourceRange()))
-    return;
-  // Names in the pattern aren't visible until after the pattern.
-  if (!isReferencePointInRange(S->getErrorPattern()->getSourceRange()))
-    checkPattern(S->getErrorPattern(), DeclVisibilityKind::LocalVariable);
-  visit(S->getBody());
 }
 
 void swift::simple_display(llvm::raw_ostream &out, NLKind kind) {

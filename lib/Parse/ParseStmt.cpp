@@ -679,6 +679,30 @@ ParserResult<BraceStmt> Parser::parseBraceItemList(Diag<> ID) {
                           BraceStmt::create(Context, LBLoc, Entries, RBLoc));
 }
 
+static ParserStatus parseOptionalControlTransferTarget(Parser &P,
+                                                       Identifier &Target,
+                                                       SourceLoc &TargetLoc,
+                                                       StmtKind Kind) {
+  // If we have an identifier after 'break' or 'continue', which is not the
+  // start of another stmt or decl, we assume it is the label to break to,
+  // unless there is a line break.  There is ambiguity with expressions (e.g.
+  // "break x+y") but since the expression after the them is dead, we don't feel
+  // bad eagerly parsing this.
+  if (!P.Tok.isAtStartOfLine()) {
+    if (P.Tok.is(tok::identifier) && !P.isStartOfStmt() &&
+        !P.isStartOfSwiftDecl()) {
+      TargetLoc = P.consumeIdentifier(&Target);
+      return makeParserSuccess();
+    } else if (P.Tok.is(tok::code_complete)) {
+      if (P.CodeCompletion)
+        P.CodeCompletion->completeStmtLabel(Kind);
+      TargetLoc = P.consumeToken(tok::code_complete);
+      return makeParserCodeCompletionStatus();
+    }
+  }
+  return makeParserSuccess();
+}
+
 /// parseStmtBreak
 ///
 ///   stmt-break:
@@ -689,17 +713,12 @@ ParserResult<Stmt> Parser::parseStmtBreak() {
   SourceLoc Loc = consumeToken(tok::kw_break);
   SourceLoc TargetLoc;
   Identifier Target;
+  ParserStatus Status;
+  Status |= parseOptionalControlTransferTarget(*this, Target, TargetLoc,
+                                               StmtKind::Break);
 
-  // If we have an identifier after this, which is not the start of another
-  // stmt or decl, we assume it is the label to break to, unless there is a
-  // line break.  There is ambiguity with expressions (e.g. "break x+y") but
-  // since the expression after the break is dead, we don't feel bad eagerly
-  // parsing this.
-  if (Tok.is(tok::identifier) && !Tok.isAtStartOfLine() &&
-      !isStartOfStmt() && !isStartOfSwiftDecl())
-    TargetLoc = consumeIdentifier(&Target);
-
-  return makeParserResult(new (Context) BreakStmt(Loc, Target, TargetLoc));
+  return makeParserResult(Status,
+                          new (Context) BreakStmt(Loc, Target, TargetLoc));
 }
 
 /// parseStmtContinue
@@ -712,17 +731,12 @@ ParserResult<Stmt> Parser::parseStmtContinue() {
   SourceLoc Loc = consumeToken(tok::kw_continue);
   SourceLoc TargetLoc;
   Identifier Target;
+  ParserStatus Status;
+  Status |= parseOptionalControlTransferTarget(*this, Target, TargetLoc,
+                                               StmtKind::Continue);
 
-  // If we have an identifier after this, which is not the start of another
-  // stmt or decl, we assume it is the label to continue to, unless there is a
-  // line break.  There is ambiguity with expressions (e.g. "continue x+y") but
-  // since the expression after the continue is dead, we don't feel bad eagerly
-  // parsing this.
-  if (Tok.is(tok::identifier) && !Tok.isAtStartOfLine() &&
-      !isStartOfStmt() && !isStartOfSwiftDecl())
-    TargetLoc = consumeIdentifier(&Target);
-
-  return makeParserResult(new (Context) ContinueStmt(Loc, Target, TargetLoc));
+  return makeParserResult(Status,
+                          new (Context) ContinueStmt(Loc, Target, TargetLoc));
 }
 
 
@@ -831,7 +845,7 @@ ParserResult<Stmt> Parser::parseStmtYield(SourceLoc tryLoc) {
 
     SmallVector<Identifier, 4> yieldLabels;
     SmallVector<SourceLoc, 4> yieldLabelLocs;
-    Expr *trailingClosure = nullptr;
+    SmallVector<TrailingClosure, 2> trailingClosures;
 
     status = parseExprList(tok::l_paren, tok::r_paren,
                            /*postfix (allow trailing closure)*/ false,
@@ -839,9 +853,9 @@ ParserResult<Stmt> Parser::parseStmtYield(SourceLoc tryLoc) {
                            lpLoc,
                            yields, yieldLabels, yieldLabelLocs,
                            rpLoc,
-                           trailingClosure,
+                           trailingClosures,
                            SyntaxKind::ExprList);
-    assert(trailingClosure == nullptr);
+    assert(trailingClosures.empty());
     assert(yieldLabels.empty());
     assert(yieldLabelLocs.empty());
   } else {
@@ -1079,7 +1093,8 @@ static void parseGuardedPattern(Parser &P, GuardedPattern &result,
     var->setImplicit();
     auto namePattern = new (P.Context) NamedPattern(var);
     auto varPattern = new (P.Context) VarPattern(loc, /*isLet*/true,
-                                                 namePattern, /*implicit*/true);
+                                                 namePattern);
+    varPattern->setImplicit();
     patternResult = makeParserResult(varPattern);
   }
 
@@ -1093,9 +1108,12 @@ static void parseGuardedPattern(Parser &P, GuardedPattern &result,
 
   // If that didn't work, use a bogus pattern so that we can fill out
   // the AST.
-  if (patternResult.isNull())
-    patternResult =
-      makeParserErrorResult(new (P.Context) AnyPattern(P.PreviousLoc));
+  if (patternResult.isNull()) {
+    auto *AP = new (P.Context) AnyPattern(P.PreviousLoc);
+    if (P.PreviousLoc.isInvalid())
+      AP->setImplicit();
+    patternResult = makeParserErrorResult(AP);
+  }
 
   // Fill in the pattern.
   status |= patternResult;
@@ -1469,7 +1487,7 @@ Parser::parseStmtConditionElement(SmallVectorImpl<StmtConditionElement> &result,
     
     if (ThePattern.isNonNull()) {
       auto *P = new (Context) VarPattern(IntroducerLoc, wasLet,
-                                          ThePattern.get(), /*impl*/false);
+                                          ThePattern.get());
       ThePattern = makeParserResult(Status, P);
     }
 
@@ -1484,14 +1502,16 @@ Parser::parseStmtConditionElement(SmallVectorImpl<StmtConditionElement> &result,
       P->setImplicit();
   }
 
-  ThePattern = parseOptionalPatternTypeAnnotation(ThePattern,
-                                                  BindingKindStr != "case");
+  ThePattern = parseOptionalPatternTypeAnnotation(ThePattern);
   if (ThePattern.hasCodeCompletion())
     Status.setHasCodeCompletion();
     
   if (ThePattern.isNull()) {
     // Recover by creating AnyPattern.
-    ThePattern = makeParserResult(new (Context) AnyPattern(PreviousLoc));
+    auto *AP = new (Context) AnyPattern(PreviousLoc);
+    if (PreviousLoc.isInvalid())
+      AP->setImplicit();
+    ThePattern = makeParserResult(AP);
   }
 
   // Conditional bindings must have an initializer.
@@ -1906,10 +1926,10 @@ ParserResult<Stmt> Parser::parseStmtDo(LabeledStmtInfo labelInfo,
   if (Tok.is(tok::kw_catch)) {
     SyntaxParsingContext CatchListCtxt(SyntaxContext,
                                        SyntaxKind::CatchClauseList);
-    // Parse 'catch' clauses 
-    SmallVector<CatchStmt*, 4> allClauses;
+    // Parse 'catch' clauses
+    SmallVector<CaseStmt *, 4> allClauses;
     do {
-      ParserResult<CatchStmt> clause = parseStmtCatch();
+      ParserResult<CaseStmt> clause = parseStmtCatch();
       status |= clause;
       if (status.hasCodeCompletion() && clause.isNull())
         return makeParserResult<Stmt>(status, nullptr);
@@ -1973,7 +1993,7 @@ ParserResult<Stmt> Parser::parseStmtDo(LabeledStmtInfo labelInfo,
 ///
 /// This routine promises to return a non-null result unless there was
 /// a code-completion token in the pattern.
-ParserResult<CatchStmt> Parser::parseStmtCatch() {
+ParserResult<CaseStmt> Parser::parseStmtCatch() {
   SyntaxParsingContext CatchClauseCtxt(SyntaxContext, SyntaxKind::CatchClause);
   // A catch block has its own scope for variables bound out of the pattern.
   Scope S(this, ScopeKind::CatchVars);
@@ -1981,13 +2001,57 @@ ParserResult<CatchStmt> Parser::parseStmtCatch() {
   SourceLoc catchLoc = consumeToken(tok::kw_catch);
 
   SmallVector<VarDecl*, 4> boundDecls;
-
   ParserStatus status;
-  GuardedPattern pattern;
-  parseGuardedPattern(*this, pattern, status, boundDecls,
-                      GuardedPatternContext::Catch, /* isFirst */ true);
-  if (status.hasCodeCompletion()) {
-    return makeParserCodeCompletionResult<CatchStmt>();
+  Optional<MutableArrayRef<VarDecl *>> caseBodyDecls;
+  SmallVector<CaseLabelItem, 1> caseLabelItems;
+
+  {
+    SyntaxParsingContext ListContext(SyntaxContext, SyntaxKind::CatchItemList);
+    bool isFirst = true;
+    while (true) {
+      SyntaxParsingContext ItemContext(SyntaxContext, SyntaxKind::CatchItem);
+      GuardedPattern PatternResult;
+      parseGuardedPattern(*this, PatternResult, status, boundDecls,
+                          GuardedPatternContext::Catch, isFirst);
+      if (status.hasCodeCompletion()) {
+        return makeParserCodeCompletionResult<CaseStmt>();
+      }
+      caseLabelItems.emplace_back(PatternResult.ThePattern,
+                                  PatternResult.WhereLoc, PatternResult.Guard);
+      isFirst = false;
+      if (!consumeIf(tok::comma))
+        break;
+    }
+
+    // Grab the first case label item pattern and use it to initialize the case
+    // body var decls.
+    SmallVector<VarDecl *, 4> tmp;
+    caseLabelItems.front().getPattern()->collectVariables(tmp);
+    auto Result = Context.AllocateUninitialized<VarDecl *>(tmp.size());
+    for (unsigned i : indices(tmp)) {
+      auto *vOld = tmp[i];
+      auto *vNew = new (Context) VarDecl(
+          /*IsStatic*/ false, vOld->getIntroducer(), false /*IsCaptureList*/,
+          vOld->getNameLoc(), vOld->getName(), vOld->getDeclContext());
+      vNew->setHasNonPatternBindingInit();
+      vNew->setImplicit();
+      Result[i] = vNew;
+    }
+    caseBodyDecls.emplace(Result);
+  }
+
+  // Add a scope so that the parser can find our body bound decls if it emits
+  // optimized accesses.
+  Optional<Scope> BodyScope;
+  if (caseBodyDecls) {
+    BodyScope.emplace(this, ScopeKind::CatchVars);
+    for (auto *v : *caseBodyDecls) {
+      setLocalDiscriminator(v);
+      // If we had any bad redefinitions, we already diagnosed them against the
+      // first case label item.
+      if (v->hasName())
+        addToScope(v, false /*diagnoseRedefinitions*/);
+    }
   }
 
   auto bodyResult = parseBraceItemList(diag::expected_lbrace_after_catch);
@@ -1998,10 +2062,12 @@ ParserResult<CatchStmt> Parser::parseStmtCatch() {
                                                          /*implicit=*/ true));
   }
 
-  auto result =
-    new (Context) CatchStmt(catchLoc, pattern.ThePattern, pattern.WhereLoc,
-                            pattern.Guard, bodyResult.get());
-  return makeParserResult(status, result);
+  return makeParserResult(
+      status, CaseStmt::create(Context, CaseParentKind::DoCatch, catchLoc,
+                               caseLabelItems,
+                               /*UnknownAttrLoc*/ SourceLoc(),
+                               bodyResult.get()->getStartLoc(),
+                               bodyResult.get(), caseBodyDecls, None, nullptr));
 }
 
 static bool isStmtForCStyle(Parser &P) {
@@ -2056,7 +2122,7 @@ ParserResult<Stmt> Parser::parseStmtForEach(LabeledStmtInfo LabelInfo) {
     llvm::SaveAndRestore<decltype(InVarOrLetPattern)>
       T(InVarOrLetPattern, Parser::IVOLP_InMatchingPattern);
     pattern = parseMatchingPattern(/*isExprBasic*/true);
-    pattern = parseOptionalPatternTypeAnnotation(pattern, /*isOptional*/false);
+    pattern = parseOptionalPatternTypeAnnotation(pattern);
   } else if (!IsCStyleFor || Tok.is(tok::kw_var)) {
     // Change the parser state to know that the pattern we're about to parse is
     // implicitly mutable.  Bound variables can be changed to mutable explicitly
@@ -2072,7 +2138,7 @@ ParserResult<Stmt> Parser::parseStmtForEach(LabeledStmtInfo LabelInfo) {
   SourceLoc InLoc;
   if (pattern.isNull()) {
     // Recover by creating a "_" pattern.
-    pattern = makeParserErrorResult(new (Context) AnyPattern(SourceLoc()));
+    pattern = makeParserErrorResult(AnyPattern::createImplicit(Context));
     consumeIf(tok::kw_in, InLoc);
   } else if (!IsCStyleFor) {
     parseToken(tok::kw_in, InLoc, diag::expected_foreach_in);
@@ -2361,6 +2427,8 @@ parseStmtCaseDefault(Parser &P, SourceLoc &CaseLoc,
 
   // Create an implicit AnyPattern to represent the default match.
   auto Any = new (P.Context) AnyPattern(CaseLoc);
+  if (CaseLoc.isInvalid())
+    Any->setImplicit();
   LabelItems.push_back(
       CaseLabelItem::getDefault(Any, WhereLoc, Guard.getPtrOrNull()));
 
@@ -2493,9 +2561,10 @@ ParserResult<CaseStmt> Parser::parseStmtCase(bool IsActive) {
   }
 
   return makeParserResult(
-      Status, CaseStmt::create(Context, CaseLoc, CaseLabelItems, UnknownAttrLoc,
-                               ColonLoc, Body, CaseBodyDecls, None,
-                               FallthroughFinder::findFallthrough(Body)));
+      Status,
+      CaseStmt::create(Context, CaseParentKind::Switch, CaseLoc, CaseLabelItems,
+                       UnknownAttrLoc, ColonLoc, Body, CaseBodyDecls, None,
+                       FallthroughFinder::findFallthrough(Body)));
 }
 
 /// stmt-pound-assert:

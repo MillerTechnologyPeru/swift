@@ -23,6 +23,7 @@ endmacro()
 
 add_subdirectory(ARC)
 add_subdirectory(Analysis)
+add_subdirectory(Differentiation)
 add_subdirectory(FunctionSignatureTransforms)
 add_subdirectory(IPO)
 add_subdirectory(LoopTransforms)
@@ -34,7 +35,6 @@ add_subdirectory(UtilityPasses)
 add_subdirectory(Utils)
 
 add_swift_host_library(swiftSILOptimizer STATIC
-  SILOptimizerRequests.cpp
   ${SILOPTIMIZER_SOURCES})
 target_link_libraries(swiftSILOptimizer PRIVATE
   swiftSIL)

@@ -107,7 +107,7 @@ ConstraintSystem::determineBestBindings() {
 
     inferTransitiveSupertypeBindings(cache, bindings);
 
-    if (getASTContext().TypeCheckerOpts.DebugConstraintSolver) {
+    if (isDebugMode()) {
       auto &log = getASTContext().TypeCheckerDebug->getStream();
       bindings.dump(typeVar, log, solverState->depth * 2);
     }
@@ -459,8 +459,8 @@ ConstraintSystem::getPotentialBindings(TypeVariableType *typeVar) const {
   // of the optional type extracted by force unwrap.
   bool isOptionalObject = false;
   if (auto *locator = typeVar->getImpl().getLocator()) {
-    auto *anchor = locator->getAnchor();
-    isOptionalObject = anchor && isa<ForceValueExpr>(anchor);
+    auto anchor = locator->getAnchor();
+    isOptionalObject = isExpr<ForceValueExpr>(anchor);
   }
 
   // Gather the constraints associated with this type variable.
@@ -766,10 +766,7 @@ ConstraintSystem::getPotentialBindings(TypeVariableType *typeVar) const {
 
         do {
           // If the type conforms to this protocol, we're covered.
-          if (TypeChecker::conformsToProtocol(
-                  testType, protocol, DC,
-                  (ConformanceCheckFlags::InExpression |
-                   ConformanceCheckFlags::SkipConditionalRequirements))) {
+          if (DC->getParentModule()->lookupConformance(testType, protocol)) {
             coveredLiteralProtocols.insert(protocol);
             break;
           }
@@ -1086,27 +1083,31 @@ bool TypeVariableBinding::attempt(ConstraintSystem &cs) const {
     cs.DefaultedConstraints.push_back(srcLocator);
 
     if (type->isHole()) {
+      // Reflect in the score that this type variable couldn't be
+      // resolved and had to be bound to a placeholder "hole" type.
+      cs.increaseScore(SK_Hole);
+
+      ConstraintFix *fix = nullptr;
       if (auto *GP = TypeVar->getImpl().getGenericParameter()) {
         auto path = dstLocator->getPath();
         // Drop `generic parameter` locator element so that all missing
         // generic parameters related to the same path can be coalesced later.
-        auto *fix = DefaultGenericArgument::create(
+        fix = DefaultGenericArgument::create(
             cs, GP,
             cs.getConstraintLocator(dstLocator->getAnchor(), path.drop_back()));
-        if (cs.recordFix(fix))
-          return true;
+      } else if (TypeVar->getImpl().isClosureParameterType()) {
+        fix = SpecifyClosureParameterType::create(cs, dstLocator);
       } else if (TypeVar->getImpl().isClosureResultType()) {
-        auto *fix = SpecifyClosureReturnType::create(
-            cs, TypeVar->getImpl().getLocator());
-        if (cs.recordFix(fix))
-          return true;
+        fix = SpecifyClosureReturnType::create(cs, dstLocator);
       } else if (srcLocator->getAnchor() &&
-                 isa<ObjectLiteralExpr>(srcLocator->getAnchor())) {
-        auto *fix = SpecifyObjectLiteralTypeImport::create(
-            cs, TypeVar->getImpl().getLocator());
-        if (cs.recordFix(fix))
-          return true;
+                 isExpr<ObjectLiteralExpr>(srcLocator->getAnchor())) {
+        fix = SpecifyObjectLiteralTypeImport::create(cs, dstLocator);
+      } else if (srcLocator->isKeyPathRoot()) {
+        fix = SpecifyKeyPathRootType::create(cs, dstLocator);
       }
+
+      if (fix && cs.recordFix(fix))
+        return true;
     }
   }
 

@@ -55,7 +55,7 @@ const uint16_t SWIFTMODULE_VERSION_MAJOR = 0;
 /// describe what change you made. The content of this comment isn't important;
 /// it just ensures a conflict if two people change the module format.
 /// Don't worry about adhering to the 80-column limit for this line.
-const uint16_t SWIFTMODULE_VERSION_MINOR = 548; // remove curried SILDeclRefs
+const uint16_t SWIFTMODULE_VERSION_MINOR = 557; // COW instructions
 
 /// A standard hash seed used for all string hashes in a serialized module.
 ///
@@ -208,6 +208,8 @@ enum class ReadWriteImplKind : uint8_t {
   MutableAddress,
   MaterializeToTemporary,
   Modify,
+  StoredWithSimpleDidSet,
+  InheritedWithSimpleDidSet,
 };
 using ReadWriteImplKindField = BCFixed<3>;
 
@@ -385,19 +387,18 @@ enum class SelfAccessKind : uint8_t {
 };
 using SelfAccessKindField = BCFixed<2>;
   
-/// Translates an operator DeclKind to a Serialization fixity, whose values are
-/// guaranteed to be stable.
-static inline OperatorKind getStableFixity(DeclKind kind) {
-  switch (kind) {
-  case DeclKind::PrefixOperator:
+/// Translates an operator decl fixity to a Serialization fixity, whose values
+/// are guaranteed to be stable.
+static inline OperatorKind getStableFixity(OperatorFixity fixity) {
+  switch (fixity) {
+  case OperatorFixity::Prefix:
     return Prefix;
-  case DeclKind::PostfixOperator:
+  case OperatorFixity::Postfix:
     return Postfix;
-  case DeclKind::InfixOperator:
+  case OperatorFixity::Infix:
     return Infix;
-  default:
-    llvm_unreachable("unknown operator fixity");
   }
+  llvm_unreachable("Unhandled case in switch");
 }
 
 // These IDs must \em not be renumbered or reordered without incrementing
@@ -1291,7 +1292,8 @@ namespace decls_block {
     GenericSignatureIDField, // interface generic signature
     TypeIDField, // interface type for opaque type
     GenericSignatureIDField, // generic environment
-    SubstitutionMapIDField // optional substitution map for underlying type
+    SubstitutionMapIDField, // optional substitution map for underlying type
+    AccessLevelField // access level
     // trailed by generic parameters
   >;
 
@@ -1446,16 +1448,14 @@ namespace decls_block {
   >;
 
   using ParenPatternLayout = BCRecordLayout<
-    PAREN_PATTERN,
-    BCFixed<1> // implicit?
+    PAREN_PATTERN
     // The sub-pattern trails the record.
   >;
 
   using TuplePatternLayout = BCRecordLayout<
     TUPLE_PATTERN,
     TypeIDField, // type
-    BCVBR<5>,    // arity
-    BCFixed<1>   // implicit?
+    BCVBR<5>     // arity
     // The elements trail the record.
   >;
 
@@ -1468,28 +1468,24 @@ namespace decls_block {
   using NamedPatternLayout = BCRecordLayout<
     NAMED_PATTERN,
     DeclIDField, // associated VarDecl
-    TypeIDField, // type
-    BCFixed<1>   // implicit?
+    TypeIDField  // type
   >;
 
   using AnyPatternLayout = BCRecordLayout<
     ANY_PATTERN,
-    TypeIDField, // type
-    BCFixed<1>   // implicit?
+    TypeIDField  // type
     // FIXME: is the type necessary?
   >;
 
   using TypedPatternLayout = BCRecordLayout<
     TYPED_PATTERN,
-    TypeIDField, // associated type
-    BCFixed<1>   // implicit?
+    TypeIDField  // associated type
     // The sub-pattern trails the record.
   >;
 
   using VarPatternLayout = BCRecordLayout<
     VAR_PATTERN,
-    BCFixed<1>, // isLet?
-    BCFixed<1>  // implicit?
+    BCFixed<1>  // isLet?
     // The sub-pattern trails the record.
   >;
 
@@ -1817,10 +1813,6 @@ namespace decls_block {
     Differentiable_DECL_ATTR,
     BCFixed<1>, // Implicit flag.
     BCFixed<1>, // Linear flag.
-    IdentifierIDField, // JVP name.
-    DeclIDField, // JVP function declaration.
-    IdentifierIDField, // VJP name.
-    DeclIDField, // VJP function declaration.
     GenericSignatureIDField, // Derivative generic signature.
     BCArray<BCFixed<1>> // Differentiation parameter indices' bitvector.
   >;
@@ -1939,6 +1931,10 @@ namespace index_block {
     /// produce Objective-C methods.
     OBJC_METHODS,
 
+    /// The derivative function configuration table, which maps original
+    /// function declaration names to derivative function configurations.
+    DERIVATIVE_FUNCTION_CONFIGURATIONS,
+
     ENTRY_POINT,
     LOCAL_DECL_CONTEXT_OFFSETS,
     LOCAL_TYPE_DECLS,
@@ -2001,6 +1997,12 @@ namespace index_block {
     DECL_MEMBER_NAMES, // record ID
     BCVBR<16>,  // table offset within the blob (see below)
     BCBlob  // map from member DeclBaseNames to offsets of DECL_MEMBERS records
+  >;
+
+  using DerivativeFunctionConfigTableLayout = BCRecordLayout<
+    DERIVATIVE_FUNCTION_CONFIGURATIONS,  // record ID
+    BCVBR<16>,     // table offset within the blob (see below)
+    BCBlob         // map from original declaration names to derivative configs
   >;
 
   using EntryPointLayout = BCRecordLayout<

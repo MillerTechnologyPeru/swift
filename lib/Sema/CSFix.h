@@ -17,6 +17,8 @@
 #ifndef SWIFT_SEMA_CSFIX_H
 #define SWIFT_SEMA_CSFIX_H
 
+#include "ConstraintLocator.h"
+#include "swift/AST/ASTNode.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/Expr.h"
 #include "swift/AST/Identifier.h"
@@ -232,6 +234,10 @@ enum class FixKind : uint8_t {
   /// inferred and has to be specified explicitly.
   SpecifyBaseTypeForContextualMember,
 
+  /// Type of the closure parameter used in the body couldn't be inferred
+  /// and has to be specified explicitly.
+  SpecifyClosureParameterType,
+
   /// Closure return type has to be explicitly specified because it can't be
   /// inferred in current context e.g. because it's a multi-statement closure.
   SpecifyClosureReturnType,
@@ -248,6 +254,20 @@ enum class FixKind : uint8_t {
   /// Member shadows a top-level name, such a name could only be accessed by
   /// prefixing it with a module name.
   AddQualifierToAccessTopLevelName,
+
+  /// A warning fix that allows a coercion to perform a force-cast.
+  AllowCoercionToForceCast,
+
+  /// Allow key path root type mismatch when applying a key path that has a
+  /// root type not convertible to the type of the base instance.
+  AllowKeyPathRootTypeMismatch,
+
+  /// Allow key path to be bound to a function type with more than 1 argument
+  AllowMultiArgFuncKeyPathMismatch,
+  
+  /// Specify key path root type when it cannot be infered from context.
+  SpecifyKeyPathRootType,
+
 };
 
 class ConstraintFix {
@@ -291,7 +311,12 @@ public:
   virtual bool diagnose(const Solution &solution,
                         bool asNote = false) const = 0;
 
-  virtual bool diagnoseForAmbiguity(ArrayRef<Solution> solutions) const { return false; }
+  using CommonFixesArray =
+      ArrayRef<std::pair<const Solution *, const ConstraintFix *>>;
+
+  virtual bool diagnoseForAmbiguity(CommonFixesArray commonFixes) const {
+    return false;
+  }
 
   void print(llvm::raw_ostream &Out) const;
 
@@ -300,7 +325,7 @@ public:
   /// Retrieve anchor expression associated with this fix.
   /// NOTE: such anchor comes directly from locator without
   /// any simplication attempts.
-  Expr *getAnchor() const;
+  ASTNode getAnchor() const;
   ConstraintLocator *getLocator() const { return Locator; }
 
 protected:
@@ -847,11 +872,15 @@ public:
 
   bool diagnose(const Solution &solution, bool asNote = false) const override;
 
-  bool diagnoseForAmbiguity(ArrayRef<Solution> solutions) const override;
+  bool diagnoseForAmbiguity(CommonFixesArray commonFixes) const override;
 
   static DefineMemberBasedOnUse *create(ConstraintSystem &cs, Type baseType,
                                         DeclNameRef member, bool alreadyDiagnosed,
                                         ConstraintLocator *locator);
+
+  static bool classof(const ConstraintFix *fix) {
+    return fix->getKind() == FixKind::DefineMemberBasedOnUse;
+  }
 };
 
 class AllowInvalidMemberRef : public ConstraintFix {
@@ -1117,8 +1146,8 @@ public:
 
   bool diagnose(const Solution &solution, bool asNote = false) const override;
 
-  bool diagnoseForAmbiguity(ArrayRef<Solution> solutions) const override {
-    return diagnose(solutions.front());
+  bool diagnoseForAmbiguity(CommonFixesArray commonFixes) const override {
+    return diagnose(*commonFixes.front().first);
   }
 
   static AddMissingArguments *create(ConstraintSystem &cs,
@@ -1161,8 +1190,8 @@ public:
 
   bool diagnose(const Solution &solution, bool asNote = false) const override;
 
-  bool diagnoseForAmbiguity(ArrayRef<Solution> solutions) const override {
-    return diagnose(solutions.front());
+  bool diagnoseForAmbiguity(CommonFixesArray commonFixes) const override {
+    return diagnose(*commonFixes.front().first);
   }
 
   /// FIXME(diagnostics): Once `resolveDeclRefExpr` is gone this
@@ -1248,6 +1277,26 @@ public:
                                            ConstraintLocator *locator);
 };
 
+class AllowMultiArgFuncKeyPathMismatch final : public ConstraintFix {
+  Type functionType;
+
+  AllowMultiArgFuncKeyPathMismatch(ConstraintSystem &cs, Type fnType,
+                                   ConstraintLocator *locator)
+      : ConstraintFix(cs, FixKind::AllowMultiArgFuncKeyPathMismatch, locator),
+        functionType(fnType) {}
+
+public:
+  std::string getName() const override {
+    return "allow conversion of a keypath type to a multi-argument function";
+  }
+
+  bool diagnose(const Solution &solution, bool asNote = false) const override;
+
+  static AllowMultiArgFuncKeyPathMismatch *create(ConstraintSystem &cs,
+                                                  Type fnType,
+                                                  ConstraintLocator *locator);
+};
+
 class TreatKeyPathSubscriptIndexAsHashable final : public ConstraintFix {
   Type NonConformingType;
 
@@ -1278,6 +1327,9 @@ class AllowInvalidRefInKeyPath final : public ConstraintFix {
     // Allow a reference to a method (instance or static) as
     // a key path component.
     Method,
+    // Allow a reference to a initializer instance as a key path
+    // component.
+    Initializer,
   } Kind;
 
   ValueDecl *Member;
@@ -1297,6 +1349,8 @@ public:
              "path component";
     case RefKind::Method:
       return "allow reference to a method as a key path component";
+    case RefKind::Initializer:
+      return "allow reference to an init method as a key path component";
     }
     llvm_unreachable("covered switch");
   }
@@ -1366,8 +1420,8 @@ public:
 
   bool diagnose(const Solution &solution, bool asNote = false) const override;
 
-  bool diagnoseForAmbiguity(ArrayRef<Solution> solutions) const override {
-    return diagnose(solutions.front());
+  bool diagnoseForAmbiguity(CommonFixesArray commonFixes) const override {
+    return diagnose(*commonFixes.front().first);
   }
 
   static DefaultGenericArgument *create(ConstraintSystem &cs,
@@ -1441,8 +1495,8 @@ public:
 
   bool diagnose(const Solution &solution, bool asNote = false) const override;
 
-  bool diagnoseForAmbiguity(ArrayRef<Solution> solutions) const override {
-    return diagnose(solutions.front());
+  bool diagnoseForAmbiguity(CommonFixesArray commonFixes) const override {
+    return diagnose(*commonFixes.front().first);
   }
 
   static IgnoreContextualType *create(ConstraintSystem &cs, Type resultTy,
@@ -1662,6 +1716,19 @@ public:
   create(ConstraintSystem &cs, DeclNameRef member, ConstraintLocator *locator);
 };
 
+class SpecifyClosureParameterType final : public ConstraintFix {
+  SpecifyClosureParameterType(ConstraintSystem &cs, ConstraintLocator *locator)
+      : ConstraintFix(cs, FixKind::SpecifyClosureParameterType, locator) {}
+
+public:
+  std::string getName() const;
+
+  bool diagnose(const Solution &solution, bool asNote = false) const;
+
+  static SpecifyClosureParameterType *create(ConstraintSystem &cs,
+                                             ConstraintLocator *locator);
+};
+
 class SpecifyClosureReturnType final : public ConstraintFix {
   SpecifyClosureReturnType(ConstraintSystem &cs, ConstraintLocator *locator)
       : ConstraintFix(cs, FixKind::SpecifyClosureReturnType, locator) {}
@@ -1721,6 +1788,75 @@ public:
 
   static AllowNonClassTypeToConvertToAnyObject *
   create(ConstraintSystem &cs, Type type, ConstraintLocator *locator);
+};
+
+/// A warning fix to maintain compatibility with the following:
+///
+/// \code
+/// func foo(_ arr: [Any]?) {
+///  _ = (arr ?? []) as [NSObject]
+/// }
+/// \endcode
+///
+/// which performs a force-cast of the array's elements, despite being spelled
+/// as a coercion.
+class AllowCoercionToForceCast final : public ContextualMismatch {
+  AllowCoercionToForceCast(ConstraintSystem &cs, Type fromType, Type toType,
+                           ConstraintLocator *locator)
+      : ContextualMismatch(cs, FixKind::AllowCoercionToForceCast, fromType,
+                           toType, locator, /*warning*/ true) {}
+
+public:
+  std::string getName() const {
+    return "allow coercion to be treated as a force-cast";
+  }
+
+  bool diagnose(const Solution &solution, bool asNote = false) const;
+
+  static AllowCoercionToForceCast *create(ConstraintSystem &cs, Type fromType,
+                                          Type toType,
+                                          ConstraintLocator *locator);
+};
+
+/// Attempt to fix a key path application where the key path type cannot be
+/// applied to a base instance of another type.
+///
+/// \code
+/// func f(_ bar: Bar , keyPath: KeyPath<Foo, Int> ) {
+///   bar[keyPath: keyPath]
+/// }
+/// \endcode
+class AllowKeyPathRootTypeMismatch final : public ContextualMismatch {
+protected:
+  AllowKeyPathRootTypeMismatch(ConstraintSystem &cs, Type lhs, Type rhs,
+                               ConstraintLocator *locator)
+      : ContextualMismatch(cs, FixKind::AllowKeyPathRootTypeMismatch, lhs, rhs,
+                           locator) {}
+
+public:
+  std::string getName() const override {
+    return "allow key path root type mismatch";
+  }
+
+  bool diagnose(const Solution &solution, bool asNote = false) const override;
+
+  static AllowKeyPathRootTypeMismatch *
+  create(ConstraintSystem &cs, Type lhs, Type rhs, ConstraintLocator *locator);
+};
+
+class SpecifyKeyPathRootType final : public ConstraintFix {
+    SpecifyKeyPathRootType(ConstraintSystem &cs, ConstraintLocator *locator)
+        : ConstraintFix(cs, FixKind::SpecifyKeyPathRootType, locator) {}
+
+  public:
+    std::string getName() const {
+      return "specify key path root type";
+    }
+
+    bool diagnose(const Solution &solution, bool asNote = false) const;
+
+    static SpecifyKeyPathRootType *create(ConstraintSystem &cs,
+                                          ConstraintLocator *locator);
 };
 
 } // end namespace constraints

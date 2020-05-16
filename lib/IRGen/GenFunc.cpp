@@ -498,6 +498,16 @@ Address irgen::projectBlockStorageCapture(IRGenFunction &IGF,
 }
 
 const TypeInfo *TypeConverter::convertFunctionType(SILFunctionType *T) {
+  // Handle `@differentiable` and `@differentiable(linear)` functions.
+  switch (T->getDifferentiabilityKind()) {
+  case DifferentiabilityKind::Normal:
+    return convertNormalDifferentiableFunctionType(T);
+  case DifferentiabilityKind::Linear:
+    return convertLinearDifferentiableFunctionType(T);
+  case DifferentiabilityKind::NonDifferentiable:
+    break;
+  }
+
   switch (T->getRepresentation()) {
   case SILFunctionType::Representation::Block:
     return new BlockTypeInfo(CanSILFunctionType(T),
@@ -606,10 +616,10 @@ static void emitApplyArgument(IRGenFunction &IGF,
                               Explosion &in,
                               Explosion &out) {
   auto silConv = IGF.IGM.silConv;
-
+  auto context = IGF.IGM.getMaximalTypeExpansionContext();
   bool isSubstituted =
-      (silConv.getSILType(substParam, substFnTy)
-         != silConv.getSILType(origParam, origFnTy));
+      (silConv.getSILType(substParam, substFnTy, context)
+         != silConv.getSILType(origParam, origFnTy, context));
 
   // For indirect arguments, we just need to pass a pointer.
   if (silConv.isSILIndirect(origParam)) {
@@ -618,8 +628,8 @@ static void emitApplyArgument(IRGenFunction &IGF,
     
     // If a substitution is in play, just bitcast the address.
     if (isSubstituted) {
-      auto origType =
-          IGF.IGM.getStoragePointerType(silConv.getSILType(origParam, origFnTy));
+      auto origType = IGF.IGM.getStoragePointerType(
+          silConv.getSILType(origParam, origFnTy, context));
       addr = IGF.Builder.CreateBitCast(addr, origType);
     }
     
@@ -635,26 +645,34 @@ static void emitApplyArgument(IRGenFunction &IGF,
   // Handle the last unsubstituted case.
   if (!isSubstituted) {
     auto &substArgTI = cast<LoadableTypeInfo>(
-      IGF.getTypeInfo(silConv.getSILType(substParam, substFnTy)));
+        IGF.getTypeInfo(silConv.getSILType(substParam, substFnTy, context)));
     substArgTI.reexplode(IGF, in, out);
     return;
   }
 
-  reemitAsUnsubstituted(IGF, silConv.getSILType(origParam, origFnTy),
-                        silConv.getSILType(substParam, substFnTy), in, out);
+  reemitAsUnsubstituted(IGF, silConv.getSILType(origParam, origFnTy, context),
+                        silConv.getSILType(substParam, substFnTy, context), in,
+                        out);
 }
 
-static CanType getArgumentLoweringType(CanType type,
-                                       SILParameterInfo paramInfo) {
+static CanType getArgumentLoweringType(CanType type, SILParameterInfo paramInfo,
+                                       bool isNoEscape) {
   switch (paramInfo.getConvention()) {
   // Capture value parameters by value, consuming them.
   case ParameterConvention::Direct_Owned:
   case ParameterConvention::Direct_Unowned:
   case ParameterConvention::Direct_Guaranteed:
+    return type;
+  // Capture indirect parameters if the closure is not [onstack]. [onstack]
+  // closures don't take ownership of their arguments so we just capture the
+  // address.
   case ParameterConvention::Indirect_In:
   case ParameterConvention::Indirect_In_Constant:
   case ParameterConvention::Indirect_In_Guaranteed:
-    return type;
+    if (isNoEscape)
+      return CanInOutType::get(type);
+    else
+      return type;
 
   // Capture inout parameters by pointer.
   case ParameterConvention::Indirect_Inout:
@@ -672,7 +690,8 @@ static bool isABIIgnoredParameterWithoutStorage(IRGenModule &IGM,
   if (param.isFormalIndirect())
     return false;
 
-  SILType argType = IGM.silConv.getSILType(param, substType);
+  SILType argType = IGM.silConv.getSILType(
+      param, substType, IGM.getMaximalTypeExpansionContext());
   auto &ti = IGF.getTypeInfoForLowered(argType.getASTType());
   // Empty values don't matter.
   return ti.getSchema().empty();
@@ -755,9 +774,11 @@ static llvm::Function *emitPartialApplicationForwarder(IRGenModule &IGM,
     GenericContextScope scope(IGM, origType->getInvocationGenericSignature());
 
     SILFunctionConventions origConv(origType, IGM.getSILModule());
-    auto &outResultTI = IGM.getTypeInfo(outConv.getSILResultType());
+    auto &outResultTI = IGM.getTypeInfo(
+        outConv.getSILResultType(IGM.getMaximalTypeExpansionContext()));
     auto &nativeResultSchema = outResultTI.nativeReturnValueSchema(IGM);
-    auto &origResultTI = IGM.getTypeInfo(origConv.getSILResultType());
+    auto &origResultTI = IGM.getTypeInfo(
+        origConv.getSILResultType(IGM.getMaximalTypeExpansionContext()));
     auto &origNativeSchema = origResultTI.nativeReturnValueSchema(IGM);
 
     // Forward the indirect return values. We might have to reabstract the
@@ -766,34 +787,39 @@ static llvm::Function *emitPartialApplicationForwarder(IRGenModule &IGM,
       assert(origNativeSchema.requiresIndirect());
       auto resultAddr = origParams.claimNext();
       resultAddr = subIGF.Builder.CreateBitCast(
-          resultAddr, IGM.getStoragePointerType(origConv.getSILResultType()));
+          resultAddr, IGM.getStoragePointerType(origConv.getSILResultType(
+                          IGM.getMaximalTypeExpansionContext())));
       args.add(resultAddr);
     } else if (origNativeSchema.requiresIndirect()) {
       assert(!nativeResultSchema.requiresIndirect());
       auto stackAddr = outResultTI.allocateStack(
-          subIGF, outConv.getSILResultType(), "return.temp");
+          subIGF,
+          outConv.getSILResultType(IGM.getMaximalTypeExpansionContext()),
+          "return.temp");
       resultValueAddr = stackAddr.getAddress();
       auto resultAddr = subIGF.Builder.CreateBitCast(
-          resultValueAddr,
-          IGM.getStoragePointerType(origConv.getSILResultType()));
+          resultValueAddr, IGM.getStoragePointerType(origConv.getSILResultType(
+                               IGM.getMaximalTypeExpansionContext())));
       args.add(resultAddr.getAddress());
     }
 
-    for (auto resultType : origConv.getIndirectSILResultTypes()) {
+    for (auto resultType : origConv.getIndirectSILResultTypes(
+             IGM.getMaximalTypeExpansionContext())) {
       auto addr = origParams.claimNext();
       addr = subIGF.Builder.CreateBitCast(
           addr, IGM.getStoragePointerType(resultType));
       args.add(addr);
     }
-    
+
     // Reemit the parameters as unsubstituted.
     for (unsigned i = 0; i < outType->getParameters().size(); ++i) {
       auto origParamInfo = origType->getParameters()[i];
-      auto &ti = IGM.getTypeInfoForLowered(
-                   origParamInfo.getArgumentType(IGM.getSILModule(), origType));
+      auto &ti = IGM.getTypeInfoForLowered(origParamInfo.getArgumentType(
+          IGM.getSILModule(), origType, IGM.getMaximalTypeExpansionContext()));
       auto schema = ti.getSchema();
-      
-      auto origParamSILType = IGM.silConv.getSILType(origParamInfo, origType);
+
+      auto origParamSILType = IGM.silConv.getSILType(
+          origParamInfo, origType, IGM.getMaximalTypeExpansionContext());
       // Forward the address of indirect value params.
       auto &nativeSchemaOrigParam = ti.nativeParameterValueSchema(IGM);
       bool isIndirectParam = origConv.isSILIndirect(origParamInfo);
@@ -820,7 +846,8 @@ static llvm::Function *emitPartialApplicationForwarder(IRGenModule &IGM,
       }
 
       // Map from the native calling convention into the explosion schema.
-      auto outTypeParamSILType = IGM.silConv.getSILType(origParamInfo, origType);
+      auto outTypeParamSILType = IGM.silConv.getSILType(
+          origParamInfo, origType, IGM.getMaximalTypeExpansionContext());
       auto &nativeSchemaOutTypeParam =
           IGM.getTypeInfo(outTypeParamSILType).nativeParameterValueSchema(IGM);
       Explosion nativeParam;
@@ -933,8 +960,8 @@ static llvm::Function *emitPartialApplicationForwarder(IRGenModule &IGM,
           findSinglePartiallyAppliedParameterIndexIgnoringEmptyTypes(
               subIGF, substType, outType);
       auto paramInfo = substType->getParameters()[paramI];
-      auto &ti = IGM.getTypeInfoForLowered(
-                     paramInfo.getArgumentType(IGM.getSILModule(), substType));
+      auto &ti = IGM.getTypeInfoForLowered(paramInfo.getArgumentType(
+          IGM.getSILModule(), substType, IGM.getMaximalTypeExpansionContext()));
       Explosion param;
       auto ref = rawData;
       // We can get a '{ swift.refcounted* }' type for AnyObject on linux.
@@ -1057,33 +1084,57 @@ static llvm::Function *emitPartialApplicationForwarder(IRGenModule &IGM,
       auto fieldConvention = conventions[nextCapturedField];
       Address fieldAddr = fieldLayout.project(subIGF, data, offsets);
       auto &fieldTI = fieldLayout.getType();
-      auto fieldSchema = fieldTI.getSchema();
       lastCapturedFieldPtr = fieldAddr.getAddress();
       
       Explosion param;
       switch (fieldConvention) {
       case ParameterConvention::Indirect_In:
       case ParameterConvention::Indirect_In_Constant: {
-        // The +1 argument is passed indirectly, so we need to copy into a
-        // temporary.
-        needsAllocas = true;
-        auto stackAddr = fieldTI.allocateStack(subIGF, fieldTy, "arg.temp");
-        auto addressPointer = stackAddr.getAddress().getAddress();
-        fieldTI.initializeWithCopy(subIGF, stackAddr.getAddress(), fieldAddr,
-                                   fieldTy, false);
-        param.add(addressPointer);
-        
-        // Remember to deallocate later.
-        addressesToDeallocate.push_back(
-            AddressToDeallocate{fieldTy, fieldTI, stackAddr});
 
+        auto initStackCopy = [&addressesToDeallocate, &needsAllocas, &param,
+                              &subIGF](const TypeInfo &fieldTI, SILType fieldTy,
+                                       Address fieldAddr) {
+          // The +1 argument is passed indirectly, so we need to copy into a
+          // temporary.
+          needsAllocas = true;
+          auto stackAddr = fieldTI.allocateStack(subIGF, fieldTy, "arg.temp");
+          auto addressPointer = stackAddr.getAddress().getAddress();
+          fieldTI.initializeWithCopy(subIGF, stackAddr.getAddress(), fieldAddr,
+                                     fieldTy, false);
+          param.add(addressPointer);
+
+          // Remember to deallocate later.
+          addressesToDeallocate.push_back(
+              AddressToDeallocate{fieldTy, fieldTI, stackAddr});
+        };
+
+        if (outType->isNoEscape()) {
+          // If the closure is [onstack] it only captured the address of the
+          // value. Load that address from the context.
+          Explosion addressExplosion;
+          cast<LoadableTypeInfo>(fieldTI).loadAsCopy(subIGF, fieldAddr,
+                                                     addressExplosion);
+          assert(fieldTy.isAddress());
+          auto newFieldTy = fieldTy.getObjectType();
+          auto &newFieldTI =
+              subIGF.getTypeInfoForLowered(newFieldTy.getASTType());
+          fieldAddr =
+              newFieldTI.getAddressForPointer(addressExplosion.claimNext());
+          initStackCopy(newFieldTI, newFieldTy, fieldAddr);
+        } else {
+          initStackCopy(fieldTI, fieldTy, fieldAddr);
+        }
         break;
       }
       case ParameterConvention::Indirect_In_Guaranteed:
-        // The argument is +0, so we can use the address of the param in
-        // the context directly.
-        param.add(fieldAddr.getAddress());
-        dependsOnContextLifetime = true;
+        if (outType->isNoEscape()) {
+          cast<LoadableTypeInfo>(fieldTI).loadAsCopy(subIGF, fieldAddr, param);
+        } else {
+          // The argument is +0, so we can use the address of the param in
+          // the context directly.
+          param.add(fieldAddr.getAddress());
+          dependsOnContextLifetime = true;
+        }
         break;
       case ParameterConvention::Indirect_Inout:
       case ParameterConvention::Indirect_InoutAliasable:
@@ -1258,7 +1309,8 @@ static llvm::Function *emitPartialApplicationForwarder(IRGenModule &IGM,
 
   // Reabstract the result value as substituted.
   SILFunctionConventions origConv(origType, IGM.getSILModule());
-  auto &outResultTI = IGM.getTypeInfo(outConv.getSILResultType());
+  auto &outResultTI = IGM.getTypeInfo(
+      outConv.getSILResultType(IGM.getMaximalTypeExpansionContext()));
   auto &nativeResultSchema = outResultTI.nativeReturnValueSchema(IGM);
   if (call->getType()->isVoidTy()) {
     if (!resultValueAddr.isValid())
@@ -1271,9 +1323,12 @@ static llvm::Function *emitPartialApplicationForwarder(IRGenModule &IGM,
       cast<LoadableTypeInfo>(outResultTI)
           .loadAsTake(subIGF, resultValueAddr, loadedResult);
       Explosion nativeResult = nativeResultSchema.mapIntoNative(
-          IGM, subIGF, loadedResult, outConv.getSILResultType(), false);
-      outResultTI.deallocateStack(subIGF, resultValueAddr,
-                                  outConv.getSILResultType());
+          IGM, subIGF, loadedResult,
+          outConv.getSILResultType(IGM.getMaximalTypeExpansionContext()),
+          false);
+      outResultTI.deallocateStack(
+          subIGF, resultValueAddr,
+          outConv.getSILResultType(IGM.getMaximalTypeExpansionContext()));
       if (nativeResult.size() == 1)
         subIGF.Builder.CreateRet(nativeResult.claimNext());
       else {
@@ -1290,7 +1345,8 @@ static llvm::Function *emitPartialApplicationForwarder(IRGenModule &IGM,
     llvm::Value *callResult = call;
     // If the result type is dependent on a type parameter we might have to
     // cast to the result type - it could be substituted.
-    if (origConv.getSILResultType().hasTypeParameter()) {
+    if (origConv.getSILResultType(IGM.getMaximalTypeExpansionContext())
+            .hasTypeParameter()) {
       auto ResType = fwd->getReturnType();
       if (ResType != callResult->getType())
         callResult = subIGF.coerceValue(callResult, ResType, subIGF.IGM.DataLayout);
@@ -1332,8 +1388,10 @@ Optional<StackAddress> irgen::emitFunctionPartialApplication(
   // destructor function.
   bool considerParameterSources = true;
   for (auto param : params) {
-    SILType argType = IGF.IGM.silConv.getSILType(param, origType);
-    auto argLoweringTy = getArgumentLoweringType(argType.getASTType(), param);
+    SILType argType = IGF.IGM.silConv.getSILType(
+        param, origType, IGF.IGM.getMaximalTypeExpansionContext());
+    auto argLoweringTy = getArgumentLoweringType(argType.getASTType(), param,
+                                                 outType->isNoEscape());
     auto &ti = IGF.getTypeInfoForLowered(argLoweringTy);
 
     if (!isa<FixedTypeInfo>(ti)) {
@@ -1358,9 +1416,11 @@ Optional<StackAddress> irgen::emitFunctionPartialApplication(
 
   // Collect the type infos for the context parameters.
   for (auto param : params) {
-    SILType argType = IGF.IGM.silConv.getSILType(param, origType);
+    SILType argType = IGF.IGM.silConv.getSILType(
+        param, origType, IGF.IGM.getMaximalTypeExpansionContext());
 
-    auto argLoweringTy = getArgumentLoweringType(argType.getASTType(), param);
+    auto argLoweringTy = getArgumentLoweringType(argType.getASTType(), param,
+                                                 outType->isNoEscape());
 
     auto &ti = IGF.getTypeInfoForLowered(argLoweringTy);
 
@@ -1598,9 +1658,15 @@ Optional<StackAddress> irgen::emitFunctionPartialApplication(
       case ParameterConvention::Indirect_In:
       case ParameterConvention::Indirect_In_Constant:
       case ParameterConvention::Indirect_In_Guaranteed: {
-        auto addr = fieldLayout.getType().getAddressForPointer(args.claimNext());
-        fieldLayout.getType().initializeWithTake(IGF, fieldAddr, addr, fieldTy,
-                                                 isOutlined);
+        if (outType->isNoEscape()) {
+          cast<LoadableTypeInfo>(fieldLayout.getType())
+              .initialize(IGF, args, fieldAddr, isOutlined);
+        } else {
+          auto addr =
+              fieldLayout.getType().getAddressForPointer(args.claimNext());
+          fieldLayout.getType().initializeWithTake(IGF, fieldAddr, addr,
+                                                   fieldTy, isOutlined);
+        }
         break;
       }
       // Take direct value arguments and inout pointers by value.
@@ -1760,7 +1826,7 @@ void irgen::emitBlockHeader(IRGenFunction &IGF,
 
   const clang::ASTContext &ASTContext = IGF.IGM.getClangASTContext();
   llvm::IntegerType *UnsignedLongTy =
-      llvm::IntegerType::get(IGF.IGM.LLVMContext,
+      llvm::IntegerType::get(IGF.IGM.getLLVMContext(),
                              ASTContext.getTypeSize(ASTContext.UnsignedLongTy));
   descriptorFields.addInt(UnsignedLongTy, 0);
   descriptorFields.addInt(UnsignedLongTy,

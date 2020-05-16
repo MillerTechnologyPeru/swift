@@ -233,9 +233,9 @@ FullApplySite findApplyFromDevirtualizedResult(SILValue value);
 /// - a type of the return value is a subclass of the expected return type.
 /// - actual return type and expected return type differ in optionality.
 /// - both types are tuple-types and some of the elements need to be casted.
-SILValue castValueToABICompatibleType(SILBuilder *builder, SILLocation Loc,
-                                      SILValue value, SILType srcTy,
-                                      SILType destTy);
+std::pair<SILValue, bool /* changedCFG */>
+castValueToABICompatibleType(SILBuilder *builder, SILLocation Loc,
+                             SILValue value, SILType srcTy, SILType destTy);
 /// Peek through trivial Enum initialization, typically for pointless
 /// Optionals.
 ///
@@ -499,6 +499,10 @@ bool calleesAreStaticallyKnowable(SILModule &module, SILDeclRef decl);
 /// be reached by calling the function represented by Decl?
 bool calleesAreStaticallyKnowable(SILModule &module, AbstractFunctionDecl *afd);
 
+/// Do we have enough information to determine all callees that could
+/// be reached by calling the function represented by Decl?
+bool calleesAreStaticallyKnowable(SILModule &module, EnumElementDecl *eed);
+
 // Attempt to get the instance for , whose static type is the same as
 // its exact dynamic type, returning a null SILValue() if we cannot find it.
 // The information that a static type is the same as the exact dynamic,
@@ -573,6 +577,15 @@ AbstractFunctionDecl *getBaseMethod(AbstractFunctionDecl *FD);
 bool tryOptimizeApplyOfPartialApply(
     PartialApplyInst *pai, SILBuilderContext &builderCtxt,
     InstModCallbacks callbacks = InstModCallbacks());
+
+/// Clone this full apply site, replacing the callee with \p newCallee while
+/// doing so.
+///
+/// The current full apply site is used as an insertion point, so the caller
+/// must clean up this full apply site.
+FullApplySite cloneFullApplySiteReplacingCallee(FullApplySite applySite,
+                                                SILValue newCallee,
+                                                SILBuilderContext &builderCtx);
 
 } // end namespace swift
 

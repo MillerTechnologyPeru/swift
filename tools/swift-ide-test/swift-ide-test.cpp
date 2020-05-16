@@ -429,6 +429,12 @@ CodeCompletionComments("code-completion-comments",
                        llvm::cl::cat(Category),
                        llvm::cl::init(false));
 
+static llvm::cl::opt<bool>
+CodeCOmpletionAnnotateResults("code-completion-annotate-results",
+                              llvm::cl::desc("annotate completion results with XML"),
+                              llvm::cl::cat(Category),
+                              llvm::cl::init(false));
+
 static llvm::cl::opt<std::string>
 DebugClientDiscriminator("debug-client-discriminator",
   llvm::cl::desc("A discriminator to prefer in lookups"),
@@ -786,7 +792,8 @@ static bool doCodeCompletionImpl(
       Invocation, /*Args=*/{}, llvm::vfs::getRealFileSystem(), CleanFile.get(),
       Offset, /*EnableASTCaching=*/false, Error,
       CodeCompletionDiagnostics ? &PrintDiags : nullptr,
-      [&](CompilerInstance &CI) {
+      [&](CompilerInstance &CI, bool reusingASTContext) {
+        assert(!reusingASTContext && "reusing AST context without enabling it");
         auto SF = CI.getCodeCompletionFile();
         performCodeCompletionSecondPass(*SF.get(), *callbacksFactory);
       });
@@ -842,7 +849,8 @@ static int doCodeCompletion(const CompilerInvocation &InitInvok,
                             StringRef CodeCompletionToken,
                             bool CodeCompletionDiagnostics,
                             bool CodeCompletionKeywords,
-                            bool CodeCompletionComments) {
+                            bool CodeCompletionComments,
+                            bool CodeCompletionAnnotateResults) {
   std::unique_ptr<ide::OnDiskCodeCompletionCache> OnDiskCache;
   if (!options::CompletionCachePath.empty()) {
     OnDiskCache = std::make_unique<ide::OnDiskCodeCompletionCache>(
@@ -850,11 +858,13 @@ static int doCodeCompletion(const CompilerInvocation &InitInvok,
   }
   ide::CodeCompletionCache CompletionCache(OnDiskCache.get());
   ide::CodeCompletionContext CompletionContext(CompletionCache);
+  CompletionContext.setAnnotateResult(CodeCompletionAnnotateResults);
 
   // Create a CodeCompletionConsumer.
   std::unique_ptr<ide::CodeCompletionConsumer> Consumer(
       new ide::PrintingCodeCompletionConsumer(
-          llvm::outs(), CodeCompletionKeywords, CodeCompletionComments));
+          llvm::outs(), CodeCompletionKeywords, CodeCompletionComments,
+          CodeCompletionAnnotateResults));
 
   // Create a factory for code completion callbacks that will feed the
   // Consumer.
@@ -878,7 +888,7 @@ static int doREPLCodeCompletion(const CompilerInvocation &InitInvok,
     BufferText = BufferText.drop_back(1);
 
   CompilerInvocation Invocation(InitInvok);
-  Invocation.setInputKind(InputFileKind::SwiftREPL);
+  Invocation.setInputKind(InputFileKind::Swift);
 
   CompilerInstance CI;
 
@@ -887,13 +897,21 @@ static int doREPLCodeCompletion(const CompilerInvocation &InitInvok,
   CI.addDiagnosticConsumer(&PrintDiags);
   if (CI.setup(Invocation))
     return 1;
-  registerIDERequestFunctions(CI.getASTContext().evaluator);
-  CI.performSema();
+  auto &ctx = CI.getASTContext();
+  registerIDERequestFunctions(ctx.evaluator);
 
-  SourceFile &SF = CI.getMainModule()->getMainSourceFile(SourceFileKind::REPL);
+  // Create an initial empty SourceFile. This only exists to feed in the
+  // implicit stdlib import.
+  ImplicitImportInfo importInfo;
+  importInfo.StdlibKind = ImplicitStdlibKind::Stdlib;
+  auto *M = ModuleDecl::create(ctx.getIdentifier(Invocation.getModuleName()),
+                               ctx, importInfo);
+  auto *SF = new (ctx) SourceFile(*M, SourceFileKind::Main, /*BufferID*/ None);
+  M->addFile(*SF);
+  performImportResolution(*SF);
 
   REPLCompletions REPLCompl;
-  REPLCompl.populate(SF, BufferText);
+  REPLCompl.populate(*SF, BufferText);
   llvm::outs() << "Begin completions\n";
   for (StringRef S : REPLCompl.getCompletionList()) {
     llvm::outs() << S << "\n";
@@ -1646,7 +1664,7 @@ static int doInputCompletenessTest(StringRef SourceFilename) {
   llvm::raw_ostream &OS = llvm::outs();
   OS << SourceFilename << ": ";
   if (isSourceInputComplete(std::move(FileBuf),
-                            SourceFileKind::REPL).IsComplete) {
+                            SourceFileKind::Main).IsComplete) {
     OS << "IS_COMPLETE\n";
   } else {
     OS << "IS_INCOMPLETE\n";
@@ -2164,34 +2182,13 @@ static int doPrintModules(const CompilerInvocation &InitInvok,
       continue;
     }
 
-    // Split the module path.
-    std::vector<StringRef> ModuleName;
-    while (!ModuleToPrint.empty()) {
-      StringRef SubModuleName;
-      std::tie(SubModuleName, ModuleToPrint) = ModuleToPrint.split('.');
-      ModuleName.push_back(SubModuleName);
-    }
-    assert(!ModuleName.empty());
-
-    // FIXME: If ModuleToPrint is a submodule, get its top-level module, which
-    // will be the DeclContext for all of its Decls since we don't have first-
-    // class submodules.
-    if (ModuleName.size() > 1) {
-      M = getModuleByFullName(Context, ModuleName[0]);
-      if (!M) {
-        llvm::errs() << "error: could not find module '" << ModuleName[0]
-                     << "'\n";
-        ExitCode = 1;
-        continue;
-      }
-    }
     std::vector<StringRef> GroupNames;
     for (StringRef G : GroupsToPrint) {
       GroupNames.push_back(G);
     }
 
-    printSubmoduleInterface(M, ModuleName, GroupNames, TraversalOptions,
-                            *Printer, Options, SynthesizeExtensions);
+    printModuleInterface(M, GroupNames, TraversalOptions, *Printer, Options,
+                         SynthesizeExtensions);
   }
 
   return ExitCode;
@@ -2756,22 +2753,22 @@ static int doPrintModuleImports(const CompilerInvocation &InitInvok,
 
     SmallVector<ModuleDecl::ImportedModule, 16> scratch;
     for (auto next : namelookup::getAllImports(M)) {
-      llvm::outs() << next.second->getName();
-      if (next.second->isClangModule())
+      llvm::outs() << next.importedModule->getName();
+      if (next.importedModule->isClangModule())
         llvm::outs() << " (Clang)";
       llvm::outs() << ":\n";
 
       scratch.clear();
-      next.second->getImportedModules(scratch,
-                                      ModuleDecl::ImportFilterKind::Public);
+      next.importedModule->getImportedModules(
+          scratch, ModuleDecl::ImportFilterKind::Public);
       // FIXME: ImportFilterKind::ShadowedBySeparateOverlay?
       for (auto &import : scratch) {
-        llvm::outs() << "\t" << import.second->getName();
-        for (auto accessPathPiece : import.first) {
+        llvm::outs() << "\t" << import.importedModule->getName();
+        for (auto accessPathPiece : import.accessPath) {
           llvm::outs() << "." << accessPathPiece.Item;
         }
 
-        if (import.second->isClangModule())
+        if (import.importedModule->isClangModule())
           llvm::outs() << " (Clang)";
         llvm::outs() << "\n";
       }
@@ -3318,7 +3315,8 @@ int main(int argc, char *argv[]) {
 
     ide::PrintingCodeCompletionConsumer Consumer(
         llvm::outs(), options::CodeCompletionKeywords,
-        options::CodeCompletionComments);
+        options::CodeCompletionComments,
+        options::CodeCOmpletionAnnotateResults);
     for (StringRef filename : options::InputFilenames) {
       auto resultsOpt = ide::OnDiskCodeCompletionCache::getFromFile(filename);
       if (!resultsOpt) {
@@ -3527,7 +3525,8 @@ int main(int argc, char *argv[]) {
                                 options::CodeCompletionToken,
                                 options::CodeCompletionDiagnostics,
                                 options::CodeCompletionKeywords,
-                                options::CodeCompletionComments);
+                                options::CodeCompletionComments,
+                                options::CodeCOmpletionAnnotateResults);
     break;
 
   case ActionType::REPLCodeCompletion:

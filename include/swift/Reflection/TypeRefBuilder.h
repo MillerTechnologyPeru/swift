@@ -361,18 +361,18 @@ public:
 
   const BoundGenericTypeRef *
   createBoundGenericType(const Optional<std::string> &mangledName,
-                         ArrayRef<const TypeRef *> args,
+                         llvm::ArrayRef<const TypeRef *> args,
                          const TypeRef *parent) {
     return BoundGenericTypeRef::create(*this, *mangledName, args, parent);
   }
-  
+
   const TypeRef *
   resolveOpaqueType(NodePointer opaqueDescriptor,
-                    ArrayRef<ArrayRef<const TypeRef *>> genericArgs,
+                    llvm::ArrayRef<llvm::ArrayRef<const TypeRef *>> genericArgs,
                     unsigned ordinal) {
     // TODO: Produce a type ref for the opaque type if the underlying type isn't
     // available.
-    
+
     // Try to resolve to the underlying type, if we can.
     if (opaqueDescriptor->getKind() ==
                             Node::Kind::OpaqueTypeDescriptorSymbolicReference) {
@@ -392,29 +392,36 @@ public:
       
       return underlyingTy->subst(*this, subs);
     }
-    return nullptr;
+    
+    // Otherwise, build a type ref that represents the opaque type.
+    return OpaqueArchetypeTypeRef::create(*this,
+                                          mangleNode(opaqueDescriptor,
+                                                     SymbolicResolver(),
+                                                     Dem),
+                                          nodeToString(opaqueDescriptor),
+                                          ordinal,
+                                          genericArgs);
   }
 
-  const TupleTypeRef *
-  createTupleType(ArrayRef<const TypeRef *> elements,
-                  std::string &&labels, bool isVariadic) {
+  const TupleTypeRef *createTupleType(llvm::ArrayRef<const TypeRef *> elements,
+                                      std::string &&labels, bool isVariadic) {
     // FIXME: Add uniqueness checks in TupleTypeRef::Profile and
     // unittests/Reflection/TypeRef.cpp if using labels for identity.
     return TupleTypeRef::create(*this, elements, isVariadic);
   }
 
   const FunctionTypeRef *createFunctionType(
-      ArrayRef<remote::FunctionParam<const TypeRef *>> params,
+      llvm::ArrayRef<remote::FunctionParam<const TypeRef *>> params,
       const TypeRef *result, FunctionTypeFlags flags) {
     return FunctionTypeRef::create(*this, params, result, flags);
   }
 
   const FunctionTypeRef *createImplFunctionType(
-    Demangle::ImplParameterConvention calleeConvention,
-    ArrayRef<Demangle::ImplFunctionParam<const TypeRef *>> params,
-    ArrayRef<Demangle::ImplFunctionResult<const TypeRef *>> results,
-    Optional<Demangle::ImplFunctionResult<const TypeRef *>> errorResult,
-    ImplFunctionTypeFlags flags) {
+      Demangle::ImplParameterConvention calleeConvention,
+      llvm::ArrayRef<Demangle::ImplFunctionParam<const TypeRef *>> params,
+      llvm::ArrayRef<Demangle::ImplFunctionResult<const TypeRef *>> results,
+      Optional<Demangle::ImplFunctionResult<const TypeRef *>> errorResult,
+      ImplFunctionTypeFlags flags) {
     // Minimal support for lowered function types. These come up in
     // reflection as capture types. For the reflection library's
     // purposes, the only part that matters is the convention.
@@ -443,9 +450,8 @@ public:
   }
 
   const ProtocolCompositionTypeRef *
-  createProtocolCompositionType(ArrayRef<BuiltProtocolDecl> protocols,
-                                BuiltType superclass,
-                                bool isClassBound) {
+  createProtocolCompositionType(llvm::ArrayRef<BuiltProtocolDecl> protocols,
+                                BuiltType superclass, bool isClassBound) {
     std::vector<const TypeRef *> protocolRefs;
     for (const auto &protocol : protocols) {
       if (!protocol)
@@ -522,7 +528,7 @@ public:
 
   const ObjCClassTypeRef *
   createBoundGenericObjCClassType(const std::string &name,
-                                  ArrayRef<const TypeRef *> args) {
+                                  llvm::ArrayRef<const TypeRef *> args) {
     // Remote reflection just ignores generic arguments for Objective-C
     // lightweight generic types, since they don't affect layout.
     return createObjCClassType(name);

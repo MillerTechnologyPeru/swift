@@ -153,7 +153,7 @@ void ExclusiveBorrowFormalAccess::diagnoseConflict(
   if (!lhsStorage->Indices) {
     assert(isa<VarDecl>(storage));
     SGF.SGM.diagnose(loc, diag::writeback_overlap_property,
-                     storage->getBaseName().getIdentifier())
+                     storage->getBaseIdentifier())
        .highlight(loc.getSourceRange());
     SGF.SGM.diagnose(rhs.loc, diag::writebackoverlap_note)
        .highlight(rhs.loc.getSourceRange());
@@ -1043,7 +1043,7 @@ static bool isReadNoneFunction(const Expr *e) {
   // we can "safely" assume it is readnone (btw, yes this is totally gross).
   // This is better to be attribute driven, a la rdar://15587352.
   if (auto *dre = dyn_cast<DeclRefExpr>(e)) {
-    DeclName name = dre->getDecl()->getFullName();
+    const DeclName name = dre->getDecl()->getName();
     return (name.getArgumentNames().size() == 1 &&
             name.getBaseName() == DeclBaseName::createConstructor() &&
             !name.getArgumentNames()[0].empty() &&
@@ -1302,7 +1302,7 @@ namespace {
     {
     }
 
-    bool hasPropertyWrapper() const {
+    bool canRewriteSetAsPropertyWrapperInit(SILGenFunction &SGF) const {
       if (auto *VD = dyn_cast<VarDecl>(Storage)) {
         // If this is not a wrapper property that can be initialized from
         // a value of the wrapped type, we can't perform the initialization.
@@ -1310,16 +1310,33 @@ namespace {
         if (!wrapperInfo.initializeFromOriginal)
           return false;
 
+        bool isAssignmentToSelfParamInInit =
+            IsOnSelfParameter &&
+            isa<ConstructorDecl>(SGF.FunctionDC->getAsDecl());
+
         // If we have a nonmutating setter on a value type, the call
         // captures all of 'self' and we cannot rewrite an assignment
         // into an initialization.
-        if (!VD->isSetterMutating() &&
+
+        // Unless this is an assignment to a self parameter inside a
+        // constructor, in which case we would like to still emit a
+        // assign_by_wrapper because the setter will be deleted by lowering
+        // anyway.
+        if (!isAssignmentToSelfParamInInit &&
+            !VD->isSetterMutating() &&
             VD->getDeclContext()->getSelfNominalTypeDecl() &&
             VD->isInstanceMember() &&
             !VD->getDeclContext()->getDeclaredInterfaceType()
                 ->hasReferenceSemantics()) {
           return false;
         }
+
+        // If this property wrapper uses autoclosure in it's initializer,
+        // the argument types of the setter and initializer shall be
+        // different, so we don't rewrite an assignment into an
+        // initialization.
+        if (VD->isInnermostPropertyWrapperInitUsesEscapingAutoClosure())
+          return false;
 
         return true;
       }
@@ -1389,9 +1406,8 @@ namespace {
       assert(getAccessorDecl()->isSetter());
       SILDeclRef setter = Accessor;
 
-      if (IsOnSelfParameter &&
+      if (IsOnSelfParameter && canRewriteSetAsPropertyWrapperInit(SGF) &&
           !Storage->isStatic() &&
-          hasPropertyWrapper() &&
           isBackingVarVisible(cast<VarDecl>(Storage),
                               SGF.FunctionDC)) {
         // This is wrapped property. Instead of emitting a setter, emit an
@@ -1471,6 +1487,17 @@ namespace {
           capturedBase = base.copy(SGF, loc).forward(SGF);
         }
 
+        // If the base is a reference and the setter expects a value, emit a
+        // load. This pattern is emitted for property wrappers with a
+        // nonmutating setter, for example.
+        if (base.getType().isAddress() &&
+            base.getType().getObjectType() ==
+                setterConv.getSILArgumentType(argIdx,
+                                              SGF.getTypeExpansionContext())) {
+          capturedBase = SGF.B.createTrivialLoadOr(
+              loc, capturedBase, LoadOwnershipQualifier::Take);
+        }
+
         PartialApplyInst *setterPAI =
           SGF.B.createPartialApply(loc, setterFRef,
                                    Substitutions, { capturedBase },
@@ -1491,8 +1518,9 @@ namespace {
             SILType::getPrimitiveAddressType(loweredSubstArgType.getASTType());
         }
         auto loweredSubstParamTy = SILType::getPrimitiveType(
-                    param.getArgumentType(SGF.SGM.M, substSetterTy),
-                    loweredSubstArgType.getCategory());
+            param.getArgumentType(SGF.SGM.M, substSetterTy,
+                                  SGF.getTypeExpansionContext()),
+            loweredSubstArgType.getCategory());
         // Handle reabstraction differences.
         if (Mval.getType() != loweredSubstParamTy) {
           Mval = SGF.emitSubstToOrigValue(loc, Mval,
@@ -1509,6 +1537,7 @@ namespace {
         SGF.B.createAssignByWrapper(loc, Mval.forward(SGF), proj.forward(SGF),
                                      initFn.getValue(), setterFn.getValue(),
                                      AssignOwnershipQualifier::Unknown);
+
         return;
       }
 
@@ -2427,7 +2456,7 @@ static ManagedValue visitRecNonInOutBase(SILGenLValue &SGL, Expr *e,
     // this handles the case in initializers where there is actually a stack
     // allocation for it as well.
     if (isa<ParamDecl>(dre->getDecl()) &&
-        dre->getDecl()->getFullName() == SGF.getASTContext().Id_self &&
+        dre->getDecl()->getName() == SGF.getASTContext().Id_self &&
         dre->getDecl()->isImplicit()) {
       ctx = SGFContext::AllowGuaranteedPlusZero;
       if (SGF.SelfInitDelegationState != SILGenFunction::NormalSelf) {
@@ -4294,7 +4323,7 @@ static bool trySetterPeephole(SILGenFunction &SGF, SILLocation loc,
   }
 
   auto &setterComponent = static_cast<GetterSetterComponent&>(component);
-  if (setterComponent.hasPropertyWrapper())
+  if (setterComponent.canRewriteSetAsPropertyWrapperInit(SGF))
     return false;
   setterComponent.emitAssignWithSetter(SGF, loc, std::move(dest),
                                        std::move(src));

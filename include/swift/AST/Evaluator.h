@@ -19,6 +19,7 @@
 #define SWIFT_AST_EVALUATOR_H
 
 #include "swift/AST/AnyRequest.h"
+#include "swift/AST/EvaluatorDependencies.h"
 #include "swift/Basic/AnyValue.h"
 #include "swift/Basic/Debug.h"
 #include "swift/Basic/Defer.h"
@@ -54,7 +55,7 @@ using AbstractRequestFunction = void(void);
 /// Form the specific request function for the given request type.
 template<typename Request>
 using RequestFunction =
-  llvm::Expected<typename Request::OutputType>(const Request &, Evaluator &);
+  typename Request::OutputType(const Request &, Evaluator &);
 
 /// Pretty stack trace handler for an arbitrary request.
 template<typename Request>
@@ -224,6 +225,8 @@ class Evaluator {
   /// so all clients must cope with cycles.
   llvm::DenseMap<AnyRequest, std::vector<AnyRequest>> dependencies;
 
+  evaluator::DependencyCollector collector;
+
   /// Retrieve the request function for the given zone and request IDs.
   AbstractRequestFunction *getAbstractRequestFunction(uint8_t zoneID,
                                                       uint8_t requestID) const;
@@ -242,7 +245,8 @@ public:
   /// diagnostics through the given diagnostics engine.
   Evaluator(DiagnosticEngine &diags,
             bool debugDumpCycles,
-            bool buildDependencyGraph);
+            bool buildDependencyGraph,
+            bool enableExperimentalPrivateDeps);
 
   /// Emit GraphViz output visualizing the request graph.
   void emitRequestEvaluatorGraphViz(llvm::StringRef graphVizPath);
@@ -264,6 +268,8 @@ public:
            typename std::enable_if<Request::isEverCached>::type * = nullptr>
   llvm::Expected<typename Request::OutputType>
   operator()(const Request &request) {
+    evaluator::DependencyCollector::StackRAII<Request> incDeps{collector,
+                                                               request};
     // The request can be cached, but check a predicate to determine
     // whether this particular instance is cached. This allows more
     // fine-grained control over which instances get cache.
@@ -279,6 +285,8 @@ public:
            typename std::enable_if<!Request::isEverCached>::type * = nullptr>
   llvm::Expected<typename Request::OutputType>
   operator()(const Request &request) {
+    evaluator::DependencyCollector::StackRAII<Request> incDeps{collector,
+                                                               request};
     return getResultUncached(request);
   }
 
@@ -366,7 +374,9 @@ private:
     FrontendStatsTracer statsTracer = make_tracer(stats, request);
     if (stats) reportEvaluatedRequest(*stats, request);
 
-    return getRequestFunction<Request>()(request, *this);
+    auto &&r = getRequestFunction<Request>()(request, *this);
+    reportEvaluatedResult<Request>(request, r);
+    return std::move(r);
   }
 
   /// Get the result of a request, consulting an external cache
@@ -377,8 +387,10 @@ private:
   llvm::Expected<typename Request::OutputType>
   getResultCached(const Request &request) {
     // If there is a cached result, return it.
-    if (auto cached = request.getCachedResult())
+    if (auto cached = request.getCachedResult()) {
+      reportEvaluatedResult<Request>(request, *cached);
       return *cached;
+    }
 
     // Compute the result.
     auto result = getResultUncached(request);
@@ -403,7 +415,9 @@ private:
     // If we already have an entry for this request in the cache, return it.
     auto known = cache.find_as(request);
     if (known != cache.end()) {
-      return known->second.template castTo<typename Request::OutputType>();
+      auto r = known->second.template castTo<typename Request::OutputType>();
+      reportEvaluatedResult<Request>(request, r);
+      return r;
     }
 
     // Compute the result.
@@ -414,6 +428,22 @@ private:
     // Cache the result.
     cache.insert({AnyRequest(request), *result});
     return result;
+  }
+
+private:
+  // Report the result of evaluating a request that is not a dependency sink -
+  // which is to say do nothing.
+  template <typename Request,
+            typename std::enable_if<!Request::isDependencySink>::type * = nullptr>
+  void reportEvaluatedResult(const Request &r,
+                             const typename Request::OutputType &o) {}
+
+  // Report the result of evaluating a request that is a dependency sink.
+  template <typename Request,
+            typename std::enable_if<Request::isDependencySink>::type * = nullptr>
+  void reportEvaluatedResult(const Request &r,
+                             const typename Request::OutputType &o) {
+    r.writeDependencySink(collector, o);
   }
 
 public:

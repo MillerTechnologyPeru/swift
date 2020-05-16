@@ -18,6 +18,7 @@
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Chrono.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/VirtualFileSystem.h"
 
@@ -38,23 +39,33 @@ makeCodeCompletionMemoryBuffer(const llvm::MemoryBuffer *origBuf,
 /// Manages \c CompilerInstance for completion like operations.
 class CompletionInstance {
   unsigned MaxASTReuseCount = 100;
+  unsigned DependencyCheckIntervalSecond = 5;
 
   std::mutex mtx;
 
   std::unique_ptr<CompilerInstance> CachedCI;
+  ModuleDecl *CurrentModule = nullptr;
   llvm::hash_code CachedArgHash;
+  llvm::sys::TimePoint<> DependencyCheckedTimestamp;
+  llvm::StringMap<llvm::hash_code> InMemoryDependencyHash;
   unsigned CachedReuseCount = 0;
+
+  void cacheCompilerInstance(std::unique_ptr<CompilerInstance> CI,
+                             llvm::hash_code ArgsHash);
+
+  bool shouldCheckDependencies() const;
 
   /// Calls \p Callback with cached \c CompilerInstance if it's usable for the
   /// specified completion request.
   /// Returns \c if the callback was called. Returns \c false if the compiler
   /// argument has changed, primary file is not the same, the \c Offset is not
   /// in function bodies, or the interface hash of the file has changed.
-  bool performCachedOperaitonIfPossible(
+  bool performCachedOperationIfPossible(
       const swift::CompilerInvocation &Invocation, llvm::hash_code ArgsHash,
+      llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> FileSystem,
       llvm::MemoryBuffer *completionBuffer, unsigned int Offset,
       DiagnosticConsumer *DiagC,
-      llvm::function_ref<void(CompilerInstance &)> Callback);
+      llvm::function_ref<void(CompilerInstance &, bool)> Callback);
 
   /// Calls \p Callback with new \c CompilerInstance for the completion
   /// request. The \c CompilerInstace passed to the callback already performed
@@ -66,9 +77,11 @@ class CompletionInstance {
       llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> FileSystem,
       llvm::MemoryBuffer *completionBuffer, unsigned int Offset,
       std::string &Error, DiagnosticConsumer *DiagC,
-      llvm::function_ref<void(CompilerInstance &)> Callback);
+      llvm::function_ref<void(CompilerInstance &, bool)> Callback);
 
 public:
+  void setDependencyCheckIntervalSecond(unsigned Value);
+
   /// Calls \p Callback with a \c CompilerInstance which is prepared for the
   /// second pass. \p Callback is resposible to perform the second pass on it.
   /// The \c CompilerInstance may be reused from the previous completions,
@@ -84,7 +97,7 @@ public:
       llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> FileSystem,
       llvm::MemoryBuffer *completionBuffer, unsigned int Offset,
       bool EnableASTCaching, std::string &Error, DiagnosticConsumer *DiagC,
-      llvm::function_ref<void(CompilerInstance &)> Callback);
+      llvm::function_ref<void(CompilerInstance &, bool)> Callback);
 };
 
 } // namespace ide

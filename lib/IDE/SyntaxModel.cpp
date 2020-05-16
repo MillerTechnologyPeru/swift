@@ -547,22 +547,24 @@ std::pair<bool, Expr *> ModelASTWalker::walkToExprPre(Expr *E) {
     return {false, E};
 
   auto addCallArgExpr = [&](Expr *Elem, TupleExpr *ParentTupleExpr) {
-    if (isCurrentCallArgExpr(ParentTupleExpr)) {
-      CharSourceRange NR = parameterNameRangeOfCallArg(ParentTupleExpr, Elem);
-      SyntaxStructureNode SN;
-      SN.Kind = SyntaxStructureKind::Argument;
-      SN.NameRange = NR;
-      SN.BodyRange = charSourceRangeFromSourceRange(SM, Elem->getSourceRange());
-      if (NR.isValid()) {
-        SN.Range = charSourceRangeFromSourceRange(SM, SourceRange(NR.getStart(),
-                                                            Elem->getEndLoc()));
-        passTokenNodesUntil(NR.getStart(), ExcludeNodeAtLocation);
-      }
-      else
-        SN.Range = SN.BodyRange;
+    if (isa<DefaultArgumentExpr>(Elem) ||
+        !isCurrentCallArgExpr(ParentTupleExpr))
+      return;
 
-      pushStructureNode(SN, Elem);
+    CharSourceRange NR = parameterNameRangeOfCallArg(ParentTupleExpr, Elem);
+    SyntaxStructureNode SN;
+    SN.Kind = SyntaxStructureKind::Argument;
+    SN.NameRange = NR;
+    SN.BodyRange = charSourceRangeFromSourceRange(SM, Elem->getSourceRange());
+    if (NR.isValid()) {
+      SN.Range = charSourceRangeFromSourceRange(SM, SourceRange(NR.getStart(),
+                                                          Elem->getEndLoc()));
+      passTokenNodesUntil(NR.getStart(), ExcludeNodeAtLocation);
     }
+    else
+      SN.Range = SN.BodyRange;
+
+    pushStructureNode(SN, Elem);
   };
 
   if (auto *ParentTupleExpr = dyn_cast_or_null<TupleExpr>(Parent.getAsExpr())) {
@@ -661,7 +663,7 @@ std::pair<bool, Expr *> ModelASTWalker::walkToExprPre(Expr *E) {
     SN.BodyRange = innerCharSourceRangeFromSourceRange(SM, E->getSourceRange());
     if (Closure->hasExplicitResultType())
       SN.TypeRange = charSourceRangeFromSourceRange(SM,
-                          Closure->getExplicitResultTypeLoc().getSourceRange());
+                          Closure->getExplicitResultTypeRepr()->getSourceRange());
 
     pushStructureNode(SN, Closure);
 
@@ -1047,7 +1049,7 @@ bool ModelASTWalker::walkToDeclPre(Decl *D) {
       // as members of the enum case decl. Walk them manually here so that they
       // end up as child nodes of enum case.
       for (auto *EnumElemD : EnumCaseD->getElements()) {
-        if (EnumElemD->getName().empty())
+        if (EnumElemD->getBaseIdentifier().empty())
           continue;
         SyntaxStructureNode SN;
         setDecl(SN, EnumElemD);
@@ -1060,7 +1062,8 @@ bool ModelASTWalker::walkToDeclPre(Decl *D) {
           SN.NameRange = charSourceRangeFromSourceRange(SM, NameRange);
         } else {
           SN.NameRange = CharSourceRange(EnumElemD->getNameLoc(),
-                                         EnumElemD->getName().getLength());
+                                         EnumElemD->getBaseIdentifier()
+                                           .getLength());
         }
 
         if (auto *E = EnumElemD->getRawValueUnchecked()) {
@@ -1211,7 +1214,13 @@ bool ModelASTWalker::handleSpecialDeclAttribute(const DeclAttribute *D,
         if (!passNode({SyntaxNodeKind::AttributeBuiltin, Next.Range}))
           return false;
       } else {
-          assert(0 && "Attribute's TokenNodes already consumed?");
+        // Only mispelled attributes, corrected in the AST but not
+        // recognised or present in TokenNodes should get us here.
+        // E.g. @availability(...) comes through as if @available(...) was
+        // specified, but there's no TokenNode because we don't highlight them
+        // (to indicate they're invalid).
+        assert(Next.Range.getStart() == D->getRange().Start &&
+               "Attribute's TokenNodes already consumed?");
       }
     } else {
         assert(0 && "No TokenNodes?");

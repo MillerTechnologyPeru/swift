@@ -160,6 +160,12 @@ func foo(n: Float) -> Int {
 
 // CHECK: <kw>protocol</kw> Prot
 protocol Prot {
+  // CHECK: <kw>associatedtype</kw> Assoc1 = <type>Array</type><<type>Never</type>>
+  associatedtype Assoc1 = Array<Never>
+  // CHECK: <kw>associatedtype</kw> Assoc2 = <type>Void</type> <kw>where</kw> <type>Assoc2</type>: <type>Equatable</type>
+  associatedtype Assoc2 = Void where Assoc2: Equatable
+  // CHECK: <kw>associatedtype</kw> Assoc3: <type>Prot</type>, <type>Prot</type> = <type>Void</type> <kw>where</kw> <type>Assoc3</type>: <type>Prot</type>
+  associatedtype Assoc3: Prot, Prot = Void where Assoc3: Prot
   // CHECK: <kw>typealias</kw> Blarg
   typealias Blarg
   // CHECK: <kw>func</kw> protMeth(x: <type>Int</type>)
@@ -448,6 +454,13 @@ func keywordInCaseAndLocalArgLabel(_ for: Int, for in: Int, class _: Int) {
   }
 }
 
+enum CasesWithMissingElement {
+  case a(Int, String),
+  // CHECK: <kw>case</kw> a(<type>Int</type>, <type>String</type>)
+  case b(Int, String),
+  // CHECK: <kw>case</kw> b(<type>Int</type>, <type>String</type>)
+}
+
 // CHECK: <kw>class</kw> Ownership {
 class Ownership {
   // CHECK: <attr-builtin>weak</attr-builtin> <kw>var</kw> w
@@ -541,3 +554,8 @@ struct FreeWhere<T> {
   // CHECK: <kw>typealias</kw> Alias = <type>Int</type> <kw>where</kw> <type>T</type> == <type>Int</type>
   typealias Alias = Int where T == Int
 }
+
+// Renamed attribute ('fixed' to @available by the parser after emitting an error, so not treated as a custom attribute)
+// CHECK: @availability(<kw>macOS</kw> <float>10.11</float>, *)
+@availability(macOS 10.11, *)
+class HasMisspelledAttr {}

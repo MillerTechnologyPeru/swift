@@ -280,6 +280,9 @@ struct PrintOptions {
   /// Whether this print option is for printing .swiftinterface file
   bool IsForSwiftInterface = false;
 
+  /// Whether to print generic requirements in a where clause.
+  bool PrintGenericRequirements = true;
+
   /// How to print opaque return types.
   enum class OpaqueReturnTypePrintingMode {
     /// 'some P1 & P2'.
@@ -432,6 +435,11 @@ struct PrintOptions {
   /// The information for converting archetypes to specialized types.
   llvm::Optional<TypeTransformContext> TransformContext;
 
+  /// Whether cross-import overlay modules are printed with their own name (e.g.
+  /// _MyFrameworkYourFrameworkAdditions) or that of their underlying module
+  /// (e.g.  MyFramework).
+  bool MapCrossImportOverlaysToDeclaringModule = false;
+
   bool PrintAsMember = false;
   
   /// Whether to print parameter specifiers as 'let' and 'var'.
@@ -518,6 +526,7 @@ struct PrintOptions {
     result.PrintDocumentationComments = true;
     result.SkipUnderscoredKeywords = true;
     result.EnumRawValues = EnumRawValueMode::PrintObjCOnly;
+    result.MapCrossImportOverlaysToDeclaringModule = true;
     return result;
   }
 

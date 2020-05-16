@@ -35,12 +35,16 @@ void ConstraintSystem::increaseScore(ScoreKind kind, unsigned value) {
   unsigned index = static_cast<unsigned>(kind);
   CurrentScore.Data[index] += value;
 
-  if (getASTContext().TypeCheckerOpts.DebugConstraintSolver && value > 0) {
+  if (isDebugMode() && value > 0) {
     auto &log = getASTContext().TypeCheckerDebug->getStream();
     if (solverState)
       log.indent(solverState->depth * 2);
     log << "(increasing score due to ";
     switch (kind) {
+    case SK_Hole:
+      log << "hole in the constraint system";
+      break;
+
     case SK_Unavailable:
       log << "use of an unavailable declaration";
       break;
@@ -98,7 +102,7 @@ bool ConstraintSystem::worseThanBestSolution() const {
       CurrentScore <= *solverState->BestScore)
     return false;
 
-  if (getASTContext().TypeCheckerOpts.DebugConstraintSolver) {
+  if (isDebugMode()) {
     auto &log = getASTContext().TypeCheckerDebug->getStream();
     log.indent(solverState->depth * 2)
       << "(solution is worse than the best solution)\n";
@@ -143,7 +147,6 @@ static bool sameOverloadChoice(const OverloadChoice &x,
     return false;
 
   switch (x.getKind()) {
-  case OverloadChoiceKind::BaseType:
   case OverloadChoiceKind::KeyPathApplication:
     // FIXME: Compare base types after substitution?
     return true;
@@ -247,10 +250,7 @@ computeSelfTypeRelationship(DeclContext *dc, ValueDecl *decl1,
 
   // If the model type does not conform to the protocol, the bases are
   // unrelated.
-  auto conformance = TypeChecker::conformsToProtocol(
-                         modelTy, proto, dc,
-                         (ConformanceCheckFlags::InExpression|
-                          ConformanceCheckFlags::SkipConditionalRequirements));
+  auto conformance = dc->getParentModule()->lookupConformance(modelTy, proto);
   if (conformance.isInvalid())
     return {SelfTypeRelationship::Unrelated, conformance};
 
@@ -382,11 +382,13 @@ static bool isDeclAsSpecializedAs(DeclContext *dc, ValueDecl *decl1,
                            false);
 }
 
-llvm::Expected<bool> CompareDeclSpecializationRequest::evaluate(
+bool CompareDeclSpecializationRequest::evaluate(
     Evaluator &eval, DeclContext *dc, ValueDecl *decl1, ValueDecl *decl2,
     bool isDynamicOverloadComparison) const {
   auto &C = decl1->getASTContext();
-  if (C.TypeCheckerOpts.DebugConstraintSolver) {
+  // Construct a constraint system to compare the two declarations.
+  ConstraintSystem cs(dc, ConstraintSystemOptions());
+  if (cs.isDebugMode()) {
     auto &log = C.TypeCheckerDebug->getStream();
     log << "Comparing declarations\n";
     decl1->print(log); 
@@ -397,8 +399,8 @@ llvm::Expected<bool> CompareDeclSpecializationRequest::evaluate(
     log << ")\n";
   }
 
-  auto completeResult = [&C](bool result) {
-    if (C.TypeCheckerOpts.DebugConstraintSolver) {
+  auto completeResult = [&C, &cs](bool result) {
+    if (cs.isDebugMode()) {
       auto &log = C.TypeCheckerDebug->getStream();
       log << "comparison result: " << (result ? "better" : "not better")
           << "\n";
@@ -499,11 +501,9 @@ llvm::Expected<bool> CompareDeclSpecializationRequest::evaluate(
     return cs.openType(type, replacements);
   };
 
-  // Construct a constraint system to compare the two declarations.
-  ConstraintSystem cs(dc, ConstraintSystemOptions());
   bool knownNonSubtype = false;
 
-  auto *locator = cs.getConstraintLocator(nullptr);
+  auto *locator = cs.getConstraintLocator({});
   // FIXME: Locator when anchored on a declaration.
   // Get the type of a reference to the second declaration.
 
@@ -737,7 +737,7 @@ static void addKeyPathDynamicMemberOverloads(
 SolutionCompareResult ConstraintSystem::compareSolutions(
     ConstraintSystem &cs, ArrayRef<Solution> solutions,
     const SolutionDiff &diff, unsigned idx1, unsigned idx2) {
-  if (cs.getASTContext().TypeCheckerOpts.DebugConstraintSolver) {
+  if (cs.isDebugMode()) {
     auto &log = cs.getASTContext().TypeCheckerDebug->getStream();
     log.indent(cs.solverState->depth * 2)
       << "comparing solutions " << idx1 << " and " << idx2 <<"\n";
@@ -767,7 +767,7 @@ SolutionCompareResult ConstraintSystem::compareSolutions(
   bool isVarAndNotProtocol2 = false;
 
   auto getWeight = [&](ConstraintLocator *locator) -> unsigned {
-    if (auto *anchor = locator->getAnchor()) {
+    if (auto *anchor = locator->getAnchor().dyn_cast<Expr *>()) {
       auto weight = cs.getExprDepth(anchor);
       if (weight)
         return *weight + 1;
@@ -895,7 +895,6 @@ SolutionCompareResult ConstraintSystem::compareSolutions(
     case OverloadChoiceKind::TupleIndex:
       continue;
 
-    case OverloadChoiceKind::BaseType:
     case OverloadChoiceKind::KeyPathApplication:
       llvm_unreachable("Never considered different");
 
@@ -1262,7 +1261,7 @@ ConstraintSystem::findBestSolution(SmallVectorImpl<Solution> &viable,
   if (viable.size() == 1)
     return 0;
 
-  if (getASTContext().TypeCheckerOpts.DebugConstraintSolver) {
+  if (isDebugMode()) {
     auto &log = getASTContext().TypeCheckerDebug->getStream();
     log.indent(solverState->depth * 2)
         << "Comparing " << viable.size() << " viable solutions\n";
