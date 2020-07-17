@@ -134,7 +134,7 @@ CF_TYPE(InkStrokeRef)
 CF_TYPE(InkTextRef)
 
 // MARK: Carbon/NavigationServices
-CF_TYPE(NavDialogRef)
+NON_CF_TYPE(NavDialogRef)
 
 // MARK: CommonCrypto
 NON_CF_TYPE(CCCryptorRef) // CFExclusions.def
