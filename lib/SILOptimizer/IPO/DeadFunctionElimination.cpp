@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "sil-dead-function-elimination"
+#include "swift/AST/ASTMangler.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/SIL/InstructionUtils.h"
 #include "swift/SIL/PatternMatch.h"
@@ -533,6 +534,17 @@ class DeadFunctionElimination : FunctionLivenessComputation {
       // The witness table is visible from "outside". Therefore all methods
       // might be called and we mark all methods as alive.
       for (const SILWitnessTable::Entry &entry : WT.getEntries()) {
+        if (entry.getKind() == SILWitnessTable::AssociatedType) {
+          SmallString<128> name{"get_assoc_type"};
+          name += Mangle::ASTMangler().mangleWitnessTable(Conf->getRootConformance());
+          name += "$";
+          name += entry.getAssociatedTypeWitness().Requirement->getNameStr();
+
+          if (SILFunction *F = Module->lookUpFunction(name))
+            makeAlive(F);
+          continue;
+        }
+
         if (entry.getKind() != SILWitnessTable::Method)
           continue;
 

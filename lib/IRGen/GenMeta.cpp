@@ -861,9 +861,8 @@ namespace {
 
         auto witness =
             entry.getAssociatedTypeWitness().Witness->mapTypeOutOfContext();
-        return IGM.getAssociatedTypeWitness(witness,
-                                            Proto->getGenericSignature(),
-                                            /*inProtocolContext=*/true);
+        return IGM.getAssociatedTypeWitness(witness, assocType,
+                                            ProtocolConformanceRef(Proto));
       }
 
       return nullptr;

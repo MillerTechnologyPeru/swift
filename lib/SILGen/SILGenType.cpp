@@ -606,6 +606,49 @@ public:
     // Emit the record for the type itself.
     Entries.push_back(SILWitnessTable::AssociatedTypeWitness{td,
                                                 witness->getCanonicalType()});
+
+    CanGenericSignature sig = Conformance->getGenericSignature().getCanonicalSignature();
+    auto anyMetadataType = CanExistentialMetatypeType::get(SGM.getASTContext().TheAnyType, MetatypeRepresentation::Thick);
+    auto accessFnType = SILFunctionType::get(sig, SILFunctionType::ExtInfo::getThin(), SILCoroutineKind::None, ParameterConvention::Direct_Unowned, {}, {}, SILResultInfo(anyMetadataType, ResultConvention::Unowned), None, {}, {}, SGM.getASTContext());
+
+    RegularLocation L(Conformance->getDeclContext()->getAsDecl());
+
+    SmallString<128> name{"get_assoc_type"};
+    name += Mangle::ASTMangler().mangleWitnessTable(Conformance);
+    name += "$";
+    name += td->getNameStr();
+    size_t entryPointNameSize = name.size();
+    name += "$helper";
+
+    static int counter = 0;
+    ++counter;
+    auto *f = SILGenFunctionBuilder(SGM).createFunction(
+        SILLinkage::Private, name, accessFnType, sig ? sig->getGenericEnvironment() : nullptr, L,
+        IsNotBare, IsNotTransparent, IsNotSerialized, IsNotDynamic);
+    f->setDebugScope(new (SGM.M) SILDebugScope(L, f));
+
+    AbstractionPattern abstraction(sig, Conformance->getType()->getCanonicalType());
+    {
+      SILBuilder builder(f->createBasicBlock());
+      auto metatype = builder.createMetatype(L, SGM.Types.getLoweredType(abstraction, MetatypeType::get(sig ? sig->getGenericEnvironment()->mapTypeIntoContext(witness) : witness, MetatypeRepresentation::Thick), TypeExpansionContext::minimal()));
+      auto result = builder.createInitExistentialMetatype(L, metatype, SILType::getPrimitiveObjectType(anyMetadataType), {});
+      builder.createReturn(L, result);
+    }
+
+    auto selfMetatypeType = CanMetatypeType::get(Conformance->getType()->getCanonicalType(), MetatypeRepresentation::Thin);
+    auto accessWitnessType = SILFunctionType::get(sig, SILFunctionType::ExtInfo::getThin().withRepresentation(SILFunctionTypeRepresentation::WitnessMethod), SILCoroutineKind::None, ParameterConvention::Direct_Unowned, SILParameterInfo(selfMetatypeType, ParameterConvention::Direct_Unowned), {}, SILResultInfo(anyMetadataType, ResultConvention::Unowned), None, {}, {}, SGM.getASTContext(), ProtocolConformanceRef(Conformance));
+    auto *witnessMethod = SILGenFunctionBuilder(SGM).createFunction(
+        SILLinkage::Private, name.substr(0, entryPointNameSize), accessWitnessType, sig ? sig->getGenericEnvironment() : nullptr, L,
+        IsNotBare, IsNotTransparent, IsNotSerialized, IsNotDynamic);
+    witnessMethod->setDebugScope(new (SGM.M) SILDebugScope(L, witnessMethod));
+    
+    {
+      SILBuilder builder(witnessMethod->createBasicBlock());
+      builder.getInsertionBB()->createFunctionArgument(SGM.Types.getLoweredType(abstraction, sig ? sig->getGenericEnvironment()->mapTypeIntoContext(selfMetatypeType) : selfMetatypeType, TypeExpansionContext::minimal()));
+      auto fnRef = builder.createFunctionRef(L, f);
+      auto result = builder.createApply(L, fnRef, f->getForwardingSubstitutionMap(), {});
+      builder.createReturn(L, result);
+    }
   }
 
   void addAssociatedConformance(AssociatedConformance req) {
