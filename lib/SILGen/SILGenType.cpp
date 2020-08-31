@@ -603,10 +603,6 @@ public:
     auto td = requirement.getAssociation();
     Type witness = Conformance->getTypeWitness(td);
 
-    // Emit the record for the type itself.
-    Entries.push_back(SILWitnessTable::AssociatedTypeWitness{td,
-                                                witness->getCanonicalType()});
-
     CanGenericSignature sig = Conformance->getGenericSignature().getCanonicalSignature();
     auto anyMetadataType = CanExistentialMetatypeType::get(SGM.getASTContext().TheAnyType, MetatypeRepresentation::Thick);
     auto accessFnType = SILFunctionType::get(sig, SILFunctionType::ExtInfo::getThin(), SILCoroutineKind::None, ParameterConvention::Direct_Unowned, {}, {}, SILResultInfo(anyMetadataType, ResultConvention::Unowned), None, {}, {}, SGM.getASTContext());
@@ -649,6 +645,10 @@ public:
       auto result = builder.createApply(L, fnRef, f->getForwardingSubstitutionMap(), {});
       builder.createReturn(L, result);
     }
+
+    // Emit the record for the type itself.
+    Entries.push_back(SILWitnessTable::AssociatedTypeWitness{
+        td, witness->getCanonicalType(), witnessMethod});
   }
 
   void addAssociatedConformance(AssociatedConformance req) {
@@ -1020,7 +1020,8 @@ public:
     Type witnessInContext = Proto->mapTypeIntoContext(witness);
     auto entry = SILWitnessTable::AssociatedTypeWitness{
                                           req.getAssociation(),
-                                          witnessInContext->getCanonicalType()};
+                                          witnessInContext->getCanonicalType(),
+                                          nullptr};
     DefaultWitnesses.push_back(entry);
   }
 

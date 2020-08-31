@@ -1362,14 +1362,12 @@ public:
       assert((size_t)piIndex.getValue() ==
              Table.size() - WitnessTableFirstRequirementOffset &&
              "offset doesn't match ProtocolInfo layout");
-#else
-      (void)entry;
 #endif
 
-      auto associate =
-          Conformance.getTypeWitness(requirement.getAssociation());
       llvm::Constant *witness = IGM.getAssociatedTypeWitness(
-          associate, requirement.getAssociation(), ProtocolConformanceRef(Conformance.getProtocol(), const_cast<RootProtocolConformance *>(&Conformance)));
+          entry.getAssociatedTypeWitness(), 
+          ProtocolConformanceRef(
+            const_cast<RootProtocolConformance *>(&Conformance)));
       witness = llvm::ConstantExpr::getBitCast(witness, IGM.Int8PtrTy);
 
       auto &schema = IGM.getOptions().PointerAuth
@@ -1438,29 +1436,18 @@ public:
   };
 } // end anonymous namespace
 
-llvm::Constant *IRGenModule::getAssociatedTypeWitness(Type type, const AssociatedTypeDecl *td,
-                                                      ProtocolConformanceRef conformance) {
+llvm::Constant *IRGenModule::getAssociatedTypeWitness(
+    const SILWitnessTable::AssociatedTypeWitness &witness,
+    ProtocolConformanceRef conformance) {
   // FIXME: If we can directly reference constant type metadata, do so.
 
   llvm::Constant *accessor;
-  if (conformance.isConcrete() && Triple.isOSAIX()) {
-    // On Classic Mac OS, use an accessor function that takes the conformance 
-    // as an argument.
-    SmallString<128> name{"get_assoc_type"};
-    name += Mangle::ASTMangler().mangleWitnessTable(conformance.getConcrete()->getRootConformance());
-    name += "$";
-    name += td->getNameStr();
-
-    auto *silAccessor = getSILModule().lookUpFunction(name);
-    if (!silAccessor) {
-      llvm::errs() << name << "\n";
-      abort();
-    }
-    accessor = getAddrOfSILFunction(silAccessor, NotForDefinition);
+  if (witness.Accessor) {
+    accessor = getAddrOfSILFunction(witness.Accessor, NotForDefinition);
 
   } else {
     // Form a reference to the mangled name for this type.
-    assert(!type->hasArchetype() && "type cannot contain archetypes");
+    Type type = witness.Witness->mapTypeOutOfContext();
     auto role = conformance.isConcrete()
       ? MangledTypeRefRole::Metadata
       : MangledTypeRefRole::DefaultAssociatedTypeWitness;
@@ -1469,10 +1456,10 @@ llvm::Constant *IRGenModule::getAssociatedTypeWitness(Type type, const Associate
   }
 
   // Set the low bit to indicate that this is a mangled name.
-  auto witness = llvm::ConstantExpr::getBitCast(accessor, Int8PtrTy);
+  auto witnessValue = llvm::ConstantExpr::getBitCast(accessor, Int8PtrTy);
   unsigned bit = ProtocolRequirementFlags::AssociatedTypeMangledNameBit;
   auto bitConstant = llvm::ConstantInt::get(IntPtrTy, bit);
-  return llvm::ConstantExpr::getInBoundsGetElementPtr(nullptr, witness,
+  return llvm::ConstantExpr::getInBoundsGetElementPtr(nullptr, witnessValue,
                                                       bitConstant);
 }
 
@@ -1627,12 +1614,10 @@ void ResilientWitnessTableBuilder::collectResilientWitnesses(
   for (auto &entry : SILWT->getEntries()) {
     // Associated type witness.
     if (entry.getKind() == SILWitnessTable::AssociatedType) {
-      // Associated type witness.
-      auto assocType = entry.getAssociatedTypeWitness().Requirement;
-      auto associate = conformance.getTypeWitness(assocType);
-
-      llvm::Constant *witness =
-          IGM.getAssociatedTypeWitness(associate, assocType, ProtocolConformanceRef(conformance.getProtocol(), const_cast<NormalProtocolConformance *>(&conformance)));
+      llvm::Constant *witness = IGM.getAssociatedTypeWitness(
+          entry.getAssociatedTypeWitness(),
+          ProtocolConformanceRef(
+            const_cast<NormalProtocolConformance *>(&conformance)));
       resilientWitnesses.push_back(witness);
       continue;
     }

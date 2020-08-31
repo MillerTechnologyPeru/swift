@@ -3176,7 +3176,7 @@ void SILDeserializer::readWitnessTableEntries(
       WitnessAssocEntryLayout::readRecord(scratch, assocId, tyId);
       AssociatedTypeDecl *assoc = cast<AssociatedTypeDecl>(MF->getDecl(assocId));
       witnessEntries.push_back(SILWitnessTable::AssociatedTypeWitness{
-        assoc, MF->getType(tyId)->getCanonicalType()
+        assoc, MF->getType(tyId)->getCanonicalType(), nullptr
       });
     } else if (kind == SIL_WITNESS_METHOD_ENTRY) {
       ArrayRef<uint64_t> ListOfValues;

@@ -98,6 +98,7 @@ namespace swift {
   class ProtocolConformance;
   class ProtocolCompositionType;
   class RootProtocolConformance;
+  struct SILAssociatedTypeWitness;
   struct SILDeclRef;
   class SILDefaultWitnessTable;
   class SILDifferentiabilityWitness;
@@ -1199,7 +1200,9 @@ public:
                                          CanGenericSignature genericSig);
 
   /// Produce an associated type witness that refers to the given type.
-  llvm::Constant *getAssociatedTypeWitness(Type type, const AssociatedTypeDecl *td, ProtocolConformanceRef conformance);
+  llvm::Constant *
+  getAssociatedTypeWitness(const SILAssociatedTypeWitness &witness,
+                           ProtocolConformanceRef conformance);
 
   void emitAssociatedTypeMetadataRecord(const RootProtocolConformance *C);
   void emitFieldDescriptor(const NominalTypeDecl *Decl);

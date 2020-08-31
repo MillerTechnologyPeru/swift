@@ -859,9 +859,7 @@ namespace {
             entry.getAssociatedTypeWitness().Requirement != assocType)
           continue;
 
-        auto witness =
-            entry.getAssociatedTypeWitness().Witness->mapTypeOutOfContext();
-        return IGM.getAssociatedTypeWitness(witness, assocType,
+        return IGM.getAssociatedTypeWitness(entry.getAssociatedTypeWitness(),
                                             ProtocolConformanceRef(Proto));
       }
 

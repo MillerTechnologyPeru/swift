@@ -6494,7 +6494,7 @@ static bool parseSILVTableEntry(
       return true;
 
     witnessEntries.push_back(SILWitnessTable::AssociatedTypeWitness{
-      assoc, Ty.getType()->getCanonicalType()
+      assoc, Ty.getType()->getCanonicalType(), nullptr
     });
     return false;
   }
