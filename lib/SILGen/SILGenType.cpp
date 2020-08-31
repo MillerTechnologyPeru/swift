@@ -456,6 +456,114 @@ static IsSerialized_t isConformanceSerialized(RootProtocolConformance *conf) {
            ? IsSerialized : IsNotSerialized;
 }
 
+
+/// If we're on a platform that uses associated type accessors, emit one for
+/// the given witness.
+///
+/// If we're not on such a platform, returns null.
+///
+/// The approach here is actually to emit \e two functions: one with a
+/// witness-method signature and one with the signature of the context that
+/// defines the actual witness type. This delegates the mapping from one
+/// signature to the other to the existing SIL machinery.
+static SILFunction *emitAssociatedTypeAccessorIfNecessary(
+    SILGenModule &SGM, const NormalProtocolConformance *Conformance,
+    const AssociatedTypeDecl *assocDecl, Type witness) {
+
+  ASTContext &ctx = SGM.getASTContext();
+  if (!ctx.LangOpts.Target.isOSAIX()) {
+    return nullptr;
+  }
+
+  RegularLocation L(Conformance->getDeclContext()->getAsDecl());
+
+  // Make a dummy name based on the conformance and the assoc type.
+  SmallString<128> name{"get_assoc_type"};
+  name += Mangle::ASTMangler().mangleWitnessTable(Conformance);
+  name += "$";
+  name += assocDecl->getNameStr();
+  size_t entryPointNameSize = name.size();
+  name += "$helper";
+
+  CanGenericSignature conformanceSig = 
+      Conformance->getGenericSignature().getCanonicalSignature();
+  GenericEnvironment *genericEnv = nullptr;
+  if (conformanceSig) {
+    genericEnv = conformanceSig->getGenericEnvironment();
+    witness = genericEnv->mapTypeIntoContext(witness);
+  }
+
+  AbstractionPattern abstraction(
+      conformanceSig, Conformance->getType()->getCanonicalType());
+
+  // First make the helper function, the one with the context signature.
+  // This will return the type as an Any.Type.
+  auto anyMetadataType = CanExistentialMetatypeType::get(
+      ctx.TheAnyType, MetatypeRepresentation::Thick);
+  auto accessFnType = SILFunctionType::get(
+      conformanceSig, SILFunctionType::ExtInfo::getThin(),
+      SILCoroutineKind::None, ParameterConvention::Direct_Unowned,
+      /*params*/{}, /*yields*/{},
+      SILResultInfo(anyMetadataType, ResultConvention::Unowned), /*error*/None,
+      /*patternSubs*/{}, /*invocationSubs*/{}, ctx);
+
+  auto *accessFn = SILGenFunctionBuilder(SGM).createFunction(
+      SILLinkage::Private, name, accessFnType, genericEnv, L,
+      IsNotBare, IsNotTransparent, IsNotSerialized, IsNotDynamic);
+  accessFn->setDebugScope(new (SGM.M) SILDebugScope(L, accessFn));
+
+  {
+    SILBuilder builder(accessFn->createBasicBlock());
+    auto metatype = builder.createMetatype(L, 
+        SGM.Types.getLoweredType(
+          abstraction,
+          MetatypeType::get(witness, MetatypeRepresentation::Thick),
+          TypeExpansionContext::minimal()));
+    auto result = builder.createInitExistentialMetatype(
+        L, metatype, SILType::getPrimitiveObjectType(anyMetadataType),
+        /*conformances*/{});
+    builder.createReturn(L, result);
+  }
+
+  // Then make the actual accessor, which has a witness-method convention.
+  auto selfMetatypeType = CanMetatypeType::get(
+      Conformance->getType()->getCanonicalType(), MetatypeRepresentation::Thin);
+  auto witnessRepr = SILFunctionType::ExtInfo::getThin()
+      .withRepresentation(SILFunctionTypeRepresentation::WitnessMethod);
+  auto accessWitnessType = SILFunctionType::get(
+      conformanceSig, witnessRepr, SILCoroutineKind::None,
+      ParameterConvention::Direct_Unowned,
+      SILParameterInfo(selfMetatypeType, ParameterConvention::Direct_Unowned),
+      /*yields*/{}, SILResultInfo(anyMetadataType, ResultConvention::Unowned),
+      /*error*/None, /*patternSubs*/{}, /*invocationSubs*/{}, ctx,
+      ProtocolConformanceRef(
+        const_cast<NormalProtocolConformance *>(Conformance)));
+  auto *witnessMethod = SILGenFunctionBuilder(SGM).createFunction(
+      SILLinkage::Private, name.substr(0, entryPointNameSize), 
+      accessWitnessType, genericEnv, L,
+      IsNotBare, IsNotTransparent, IsNotSerialized, IsNotDynamic);
+  witnessMethod->setDebugScope(new (SGM.M) SILDebugScope(L, witnessMethod));
+  
+  {
+    SILBuilder builder(witnessMethod->createBasicBlock());
+
+    Type selfMetatypeTypeInContext = selfMetatypeType;
+    if (genericEnv) {
+      selfMetatypeTypeInContext = 
+          genericEnv->mapTypeIntoContext(selfMetatypeType);
+    }
+    builder.getInsertionBB()->createFunctionArgument(
+        SGM.Types.getLoweredType(abstraction, selfMetatypeTypeInContext, 
+                                 TypeExpansionContext::minimal()));
+    auto fnRef = builder.createFunctionRef(L, accessFn);
+    auto result = builder.createApply(
+        L, fnRef, accessFn->getForwardingSubstitutionMap(), /*args*/{});
+    builder.createReturn(L, result);
+  }
+
+  return witnessMethod;
+}
+
 /// Emit a witness table for a protocol conformance.
 class SILGenConformance : public SILGenWitnessTable<SILGenConformance> {
   using super = SILGenWitnessTable<SILGenConformance>;
@@ -603,52 +711,12 @@ public:
     auto td = requirement.getAssociation();
     Type witness = Conformance->getTypeWitness(td);
 
-    CanGenericSignature sig = Conformance->getGenericSignature().getCanonicalSignature();
-    auto anyMetadataType = CanExistentialMetatypeType::get(SGM.getASTContext().TheAnyType, MetatypeRepresentation::Thick);
-    auto accessFnType = SILFunctionType::get(sig, SILFunctionType::ExtInfo::getThin(), SILCoroutineKind::None, ParameterConvention::Direct_Unowned, {}, {}, SILResultInfo(anyMetadataType, ResultConvention::Unowned), None, {}, {}, SGM.getASTContext());
-
-    RegularLocation L(Conformance->getDeclContext()->getAsDecl());
-
-    SmallString<128> name{"get_assoc_type"};
-    name += Mangle::ASTMangler().mangleWitnessTable(Conformance);
-    name += "$";
-    name += td->getNameStr();
-    size_t entryPointNameSize = name.size();
-    name += "$helper";
-
-    static int counter = 0;
-    ++counter;
-    auto *f = SILGenFunctionBuilder(SGM).createFunction(
-        SILLinkage::Private, name, accessFnType, sig ? sig->getGenericEnvironment() : nullptr, L,
-        IsNotBare, IsNotTransparent, IsNotSerialized, IsNotDynamic);
-    f->setDebugScope(new (SGM.M) SILDebugScope(L, f));
-
-    AbstractionPattern abstraction(sig, Conformance->getType()->getCanonicalType());
-    {
-      SILBuilder builder(f->createBasicBlock());
-      auto metatype = builder.createMetatype(L, SGM.Types.getLoweredType(abstraction, MetatypeType::get(sig ? sig->getGenericEnvironment()->mapTypeIntoContext(witness) : witness, MetatypeRepresentation::Thick), TypeExpansionContext::minimal()));
-      auto result = builder.createInitExistentialMetatype(L, metatype, SILType::getPrimitiveObjectType(anyMetadataType), {});
-      builder.createReturn(L, result);
-    }
-
-    auto selfMetatypeType = CanMetatypeType::get(Conformance->getType()->getCanonicalType(), MetatypeRepresentation::Thin);
-    auto accessWitnessType = SILFunctionType::get(sig, SILFunctionType::ExtInfo::getThin().withRepresentation(SILFunctionTypeRepresentation::WitnessMethod), SILCoroutineKind::None, ParameterConvention::Direct_Unowned, SILParameterInfo(selfMetatypeType, ParameterConvention::Direct_Unowned), {}, SILResultInfo(anyMetadataType, ResultConvention::Unowned), None, {}, {}, SGM.getASTContext(), ProtocolConformanceRef(Conformance));
-    auto *witnessMethod = SILGenFunctionBuilder(SGM).createFunction(
-        SILLinkage::Private, name.substr(0, entryPointNameSize), accessWitnessType, sig ? sig->getGenericEnvironment() : nullptr, L,
-        IsNotBare, IsNotTransparent, IsNotSerialized, IsNotDynamic);
-    witnessMethod->setDebugScope(new (SGM.M) SILDebugScope(L, witnessMethod));
-    
-    {
-      SILBuilder builder(witnessMethod->createBasicBlock());
-      builder.getInsertionBB()->createFunctionArgument(SGM.Types.getLoweredType(abstraction, sig ? sig->getGenericEnvironment()->mapTypeIntoContext(selfMetatypeType) : selfMetatypeType, TypeExpansionContext::minimal()));
-      auto fnRef = builder.createFunctionRef(L, f);
-      auto result = builder.createApply(L, fnRef, f->getForwardingSubstitutionMap(), {});
-      builder.createReturn(L, result);
-    }
+    SILFunction *accessor = emitAssociatedTypeAccessorIfNecessary(
+        SGM, Conformance, td, witness);
 
     // Emit the record for the type itself.
     Entries.push_back(SILWitnessTable::AssociatedTypeWitness{
-        td, witness->getCanonicalType(), witnessMethod});
+        td, witness->getCanonicalType(), accessor});
   }
 
   void addAssociatedConformance(AssociatedConformance req) {
