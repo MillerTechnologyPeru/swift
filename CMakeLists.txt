@@ -285,7 +285,7 @@ set(SWIFT_ANDROID_DEPLOY_DEVICE_PATH "" CACHE STRING
 #
 
 foreach(sdk ANDROID;FREEBSD;LINUX;WINDOWS;HAIKU;WASI)
-  foreach(arch aarch64;armv6;armv7;i686;powerpc64;powerpc64le;s390x;wasm32;x86_64)
+  foreach(arch aarch64;armv5;armv6;armv7;i686;powerpc64;powerpc64le;s390x;wasm32;x86_64)
     set(SWIFT_${sdk}_${arch}_ICU_UC "" CACHE STRING
         "Path to a directory containing the icuuc library for ${sdk}")
     set(SWIFT_${sdk}_${arch}_ICU_UC_INCLUDE "" CACHE STRING
@@ -636,6 +636,8 @@ else()
     set(SWIFT_HOST_VARIANT_ARCH_default "powerpc64le")
   elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "s390x")
     set(SWIFT_HOST_VARIANT_ARCH_default "s390x")
+  elseif("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "armv5|armv5te")
+    set(SWIFT_HOST_VARIANT_ARCH_default "armv5")
   # FIXME: Only matches v6l/v7l - by far the most common variants
   elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "armv6l")
     set(SWIFT_HOST_VARIANT_ARCH_default "armv6")
