@@ -390,7 +390,7 @@ internal var _objectPointerLowSpareBitShift: UInt {
     }
 }
 
-#if arch(i386) || arch(arm) || arch(wasm32) || arch(powerpc64) || arch(
+#if arch(i386) || arch(arm) || arch(wasm32) || arch(powerpc) || arch(powerpc64) || arch(
   powerpc64le) || arch(s390x) || arch(arm64_32)
 @inlinable
 internal var _objectPointerIsObjCBit: UInt {

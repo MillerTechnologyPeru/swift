@@ -227,6 +227,7 @@ class StdlibDeploymentTarget(object):
         "armv6",
         "armv7",
         "aarch64",
+        "powerpc",
         "powerpc64",
         "powerpc64le",
         "s390x"])
@@ -303,6 +304,8 @@ class StdlibDeploymentTarget(object):
                 return StdlibDeploymentTarget.Linux.armv6
             elif machine == 'aarch64':
                 return StdlibDeploymentTarget.Linux.aarch64
+            elif machine == 'ppc':
+                return StdlibDeploymentTarget.Linux.powerpc
             elif machine == 'ppc64':
                 return StdlibDeploymentTarget.Linux.powerpc64
             elif machine == 'ppc64le':
