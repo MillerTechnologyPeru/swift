@@ -509,7 +509,7 @@ function set_build_options_for_host() {
             esac
             ;;
         linux-armv5)
-            SWIFT_HOST_TRIPLE="armv5te-unknown-linux-gnueabi"
+            SWIFT_HOST_TRIPLE="armv5-unknown-linux-gnueabi"
             llvm_target_arch="ARM"
             ;;
         linux-armv6)
