@@ -9,6 +9,8 @@ function(set_if_arch_bitness var_name)
   if("${SIA_ARCH}" STREQUAL "i386" OR
      "${SIA_ARCH}" STREQUAL "i686" OR
      "${SIA_ARCH}" STREQUAL "x86" OR
+     "${SIA_ARCH}" STREQUAL "mips" OR
+     "${SIA_ARCH}" STREQUAL "mipsel" OR
      "${SIA_ARCH}" STREQUAL "armv6" OR
      "${SIA_ARCH}" STREQUAL "armv7" OR
      "${SIA_ARCH}" STREQUAL "armv7k" OR
@@ -23,6 +25,8 @@ function(set_if_arch_bitness var_name)
          "${SIA_ARCH}" STREQUAL "aarch64" OR
          "${SIA_ARCH}" STREQUAL "powerpc64" OR
          "${SIA_ARCH}" STREQUAL "powerpc64le" OR
+         "${SIA_ARCH}" STREQUAL "mips64" OR
+         "${SIA_ARCH}" STREQUAL "mips64el" OR
          "${SIA_ARCH}" STREQUAL "s390x")
     set("${var_name}" "${SIA_CASE_64_BIT}" PARENT_SCOPE)
   else()
