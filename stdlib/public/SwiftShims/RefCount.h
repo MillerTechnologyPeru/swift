@@ -1319,7 +1319,12 @@ class HeapObjectSideTableEntry {
 
   public:
   HeapObjectSideTableEntry(HeapObject *newObject)
-    : object(newObject), refCounts()
+    : object(newObject), 
+#if __arm__ || __powerpc__
+   refCounts(SideTableRefCounts::Initialized)
+#else
+   refCounts()
+#endif
   { }
 
 #pragma clang diagnostic push
