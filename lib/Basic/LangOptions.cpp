@@ -354,6 +354,7 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
   case llvm::Triple::ArchType::x86_64:
     addPlatformConditionValue(PlatformConditionKind::Endianness, "little");
     break;
+  case llvm::Triple::ArchType::ppc:
   case llvm::Triple::ArchType::ppc64:
   case llvm::Triple::ArchType::systemz:
     addPlatformConditionValue(PlatformConditionKind::Endianness, "big");
