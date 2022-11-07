@@ -134,8 +134,7 @@ fn_k()
 // expected-note@-2 {{did you mean 'macOS'?}} {{8-16=macOS}}
 // expected-note@-3 {{did you mean 'iOS'?}} {{8-16=iOS}}
 // expected-warning@-4 {{unknown architecture for build configuration 'arch'}}
-// expected-note@-5 {{did you mean 'arm'?}} {{26-29=arm}}
-// expected-note@-6 {{did you mean 'i386'?}} {{26-29=i386}}
+// expected-note@-5 {{did you mean 'mips'?}} {{26-29=mips}}
 func undefinedFunc() // ignored.
 #endif
 undefinedFunc() // expected-error {{cannot find 'undefinedFunc' in scope}}
