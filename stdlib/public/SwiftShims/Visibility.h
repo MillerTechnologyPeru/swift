@@ -117,7 +117,7 @@
 // FIXME: this #else should be some sort of #elif Windows
 #else // !__MACH__ && !__ELF__
 
-# if defined(__CYGWIN__)
+# if defined(__CYGWIN__) || defined(__POWERPC__)
 #  define SWIFT_EXPORT_ATTRIBUTE
 # else
 
